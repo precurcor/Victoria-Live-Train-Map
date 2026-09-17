@@ -7,6 +7,10 @@
 
 A physical, real-time LED map of the Melbourne train network, powered by an ESP32-S3 microcontroller. Train movements are displayed using addressable RGB LEDs, with live data fetched over Wi-Fi.
 
+## Victoria layout editor
+
+[Victoria Rail Layout Studio](layout-studio/README.md) is an offline visual editor for moving stations and hardware, setting board dimensions, and adding multiple LEDs along parallel tracks. It includes a Victoria network draft and exports linked, **unrouted** KiCad PCB/schematic projects. Download and open `layout-studio/Victoria-Rail-Layout-Studio.html`; see its guide for the remaining electrical and validation work. The original design below is retained.
+
 ![Overview_at_Southern_Cross](Images/Overview_at_Southern_Cross.avif)
 
 ## Features
