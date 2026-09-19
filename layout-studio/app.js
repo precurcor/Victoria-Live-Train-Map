@@ -5,7 +5,7 @@
   const fmt=n=>Number(n).toFixed(2).replace(/\.00$/,'');
   let model=C.addRegional(C.baseProject(A),A),generated,issues=[],selected=new Set(),tab='stations',query='',showUnplaced=false;
   let tool='select',preview=false,showLabels=true,showNodes=false,showHardware=true,showGrid=true,showCaps=false,snap=true;
-  let history=[],future=[],view={x:0,y:0,w:700,h:500},drag=null,space=false,connectStart=null,toastTimer,saveTimer,dirty=false;
+  let history=[],future=[],view={x:0,y:0,w:700,h:500},drag=null,space=false,connectStart=null,toastTimer,saveTimer,dirty=false,exporting=false,footprintTarget=null;
   const STORE='victoria-rail-layout-v1', svg=$('#canvas'),wrap=$('#canvasWrap');
   const fpCache=new Map();
   const originalBlocks=new Map(A.nodes.flatMap(n=>n.ledIds.filter(v=>v!==null).map(v=>[v,n.id])));
@@ -14,17 +14,24 @@
   function node(id){return model.nodes.find(x=>x.id===id);}
   function edge(id){return model.edges.find(x=>x.id===id);}
   function hardware(id){return model.hardware.find(x=>x.id===id);}
-  function item(id){return node(id)||edge(id)||hardware(id);}
+  function capacitor(id){return generated?.caps.find(x=>x.id===id);}
+  function item(id){return node(id)||edge(id)||hardware(id)||capacitor(id);}
+  function editable(id){const c=capacitor(id);if(!c)return item(id);model.capPositions??={};return model.capPositions[id]??={x:c.x,y:c.y,angle:c.angle,locked:!!c.locked};}
+  function nextRef(prefix){let i=1;while(model.hardware.some(h=>h.ref===prefix+i))i++;return prefix+i;}
+  function replaceAllowed(){return !dirty||confirm('Replace this layout? Save a project copy first to keep your changes.');}
+  function moveSelection(dx,dy){C.translate(model,selected,dx,dy);}
+  function cancelDrag(){if(drag?.before)model=JSON.parse(drag.before);drag=null;wrap.classList.remove('dragging');regenerate();}
+
   function snapshot(){return JSON.stringify(model);}
   function changed(before){if(before===snapshot())return;history.push(before);if(history.length>50)history.shift();future=[];dirty=true;regenerate();scheduleSave();}
   function mutate(fn){const before=snapshot();try{fn();C.generate(model);C.validateSchema(model);changed(before);}catch(e){model=JSON.parse(before);regenerate();toast(e.message);}}
   function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(()=>{try{localStorage.setItem(STORE,snapshot());status('Autosaved locally · Save project for a portable copy');}catch{status('Autosave unavailable — use Save project');}},500);}
-  function undo(redo=false){const from=redo?future:history,to=redo?history:future;if(!from.length)return;to.push(snapshot());model=JSON.parse(from.pop());selected.clear();dirty=true;regenerate();scheduleSave();}
+  function undo(redo=false){const from=redo?future:history,to=redo?history:future;if(!from.length)return;to.push(snapshot());model=JSON.parse(from.pop());fpCache.clear();selected.clear();dirty=true;regenerate();scheduleSave();}
   function saveFile(name,text,type='application/octet-stream'){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}
   const fileSlug=()=>model.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'rail-layout';
   function saveProject(){saveFile(fileSlug()+'.rail.json',JSON.stringify(model,null,2),'application/json');dirty=false;status('Project downloaded');}
   function boundsFor(ids){
-    const ps=[];for(const id of ids){const n=node(id),h=hardware(id),e=edge(id);if(n)ps.push({x:n.x-15,y:n.y-15},{x:n.x+15,y:n.y+15});
+    const ps=[];for(const id of ids){const n=node(id),h=hardware(id)||capacitor(id),e=edge(id);if(n)ps.push({x:n.x-15,y:n.y-15},{x:n.x+15,y:n.y+15});
       if(h)ps.push({x:h.x-h.w,y:h.y-h.h},{x:h.x+h.w,y:h.y+h.h});if(e){for(const l of e.lanes){const c=C.curve(model,e,l);ps.push(...c);}}}
     if(!ps.length)return {x:0,y:0,w:model.board.width,h:model.board.height};
     const xs=ps.map(p=>p.x),ys=ps.map(p=>p.y);return {x:Math.min(...xs),y:Math.min(...ys),w:Math.max(...xs)-Math.min(...xs),h:Math.max(...ys)-Math.min(...ys)};
@@ -53,11 +60,11 @@
       if(active){const el=$('#search');el.focus();if(el.type!=='search')el.setSelectionRange(caret,caret);}
     }else if(tab==='hardware'){
       const key=model.hardware.filter(h=>h.kind!=='existing'||/^[US]/.test(h.ref));
-      host.innerHTML=`<h2>Components</h2><p class="muted small">Inherited footprints retain their circuit connections. New parts remain mechanical until assigned.</p><div class="actions"><button data-action="addOled">+ Bare OLED</button><button data-action="addEncoder">+ Encoder</button><button data-action="addHole">+ Hole</button><button data-action="importFootprint">Import footprint</button></div><div class="actions"><button data-action="selectController">Select controller group</button><button data-action="selectAllHardware">Select all hardware</button></div><div class="list">${key.map(h=>`<button data-locate="${h.id}" class="${selected.has(h.id)?'selected':''}"><span>${esc(h.ref)}<br><span class="small muted">${esc(h.name)}</span></span></button>`).join('')}</div><details><summary>All ${model.hardware.length} components</summary><div class="list">${model.hardware.filter(h=>!key.includes(h)).map(h=>`<button data-locate="${h.id}">${esc(h.ref)} · ${esc(h.name)}</button>`).join('')}</div></details>`;
+      host.innerHTML=`<h2>Components</h2><p class="muted small">Inherited footprints retain their circuit connections. Assign a real footprint and pin nets to include a new part in both PCB and schematic.</p><div class="actions"><button data-action="addOled">+ Bare OLED</button><button data-action="addEncoder">+ Encoder</button><button data-action="addHole">+ Hole</button><button data-action="importFootprint">Import footprint</button></div><div class="actions"><button data-action="selectController">Select controller group</button><button data-action="selectAllHardware">Select all hardware</button></div><div class="list">${key.map(h=>`<button data-locate="${h.id}" class="${selected.has(h.id)?'selected':''}"><span>${esc(h.ref)}<br><span class="small muted">${esc(h.name)}</span></span></button>`).join('')}</div><details><summary>All ${model.hardware.length} components</summary><div class="list">${model.hardware.filter(h=>!key.includes(h)).map(h=>`<button data-locate="${h.id}">${esc(h.ref)} · ${esc(h.name)}</button>`).join('')}</div></details>`;
     }else{
       host.innerHTML=`<h2>Board setup</h2>${input('Project name','board.name',model.name,{type:'text'})}<div class="two">${input('Width · mm','board.width',model.board.width,{min:20,max:2000,step:1})}${input('Height · mm','board.height',model.board.height,{min:20,max:2000,step:1})}</div>
         ${input('Snap grid · mm','board.grid',model.board.grid,{min:.1,max:20,step:.1})}<label><input type="checkbox" id="snapToggle" ${snap?'checked':''}> Snap objects to grid</label>${input('LEDs per decoupling capacitor','board.capEvery',model.board.capEvery,{min:1,max:100,step:1})}
-        <p class="muted small">Board resizing changes the edge only. Components and LED footprints keep their real physical size.</p><hr class="separator"><h3>Display layers</h3><label><input type="checkbox" id="labelsToggle" ${showLabels?'checked':''}> Station names</label><label><input type="checkbox" id="nodesToggle" ${showNodes?'checked':''}> Intermediate nodes / junctions</label><label><input type="checkbox" id="hardwareToggle" ${showHardware?'checked':''}> Hardware</label><label><input type="checkbox" id="capsToggle" ${showCaps?'checked':''}> Proposed grouped capacitors</label>
+        <p class="muted small">Board resizing changes the edge only. Components and LED footprints keep their real physical size.</p><hr class="separator"><h3>Display layers</h3><label><input type="checkbox" id="labelsToggle" ${showLabels?'checked':''}> Station names</label><label><input type="checkbox" id="nodesToggle" ${showNodes?'checked':''}> Intermediate nodes / junctions</label><label><input type="checkbox" id="hardwareToggle" ${showHardware?'checked':''}> Hardware</label><label><input type="checkbox" id="capsToggle" ${showCaps?'checked':''}> Capacitors · select and move</label>
         <hr class="separator"><h3>Density tools</h3><p class="muted small">Add LEDs to every existing connection. Prefer editing individual spans for final work.</p><label>Extra LEDs per lane<input id="allDensity" type="number" value="1" min="0" max="30"></label><button data-action="allDensity" class="wide">Apply to every connection</button><div class="note warning">Increasing LEDs also increases power, firmware memory and routing requirements. Live geographic mapping must be extended separately.</div>`;
     }
   }
@@ -77,8 +84,10 @@
       const a=node(i.a),b=node(i.b),counts=generated.paths.find(p=>p.e.id===i.id)?.count||0;
       host.innerHTML=`<span class="subtitle">Parallel track connection</span><h2 style="margin-top:8px">${esc(a.name||a.id)} → ${esc(b.name||b.id)}</h2><div class="stats"><div class="stat"><strong>${i.lanes.length}</strong><span>Track paths</span></div><div class="stat"><strong>${counts*i.lanes.length}</strong><span>Added LEDs</span></div></div>${selectInput('LED placement','mode',i.mode,[['count','Exact number per track'],['pitch','Target spacing in mm']])}
         ${i.mode==='count'?input('Intermediate LEDs per track','count',i.count,{min:0,max:300,step:1}):input('Target pitch · mm','pitch',i.pitch,{min:1.7,max:100})}<p class="muted small">Excludes the LEDs at either endpoint. All parallel tracks use the same number of columns.</p>${selectInput('Output chain for new LEDs','channel',i.channel,Array.from({length:8},(_,j)=>[j+1,'Channel '+(j+1)]))}<h3>Route shape</h3><p class="muted small">Drag the diamond on the canvas to shape the bend.</p><button data-action="straighten" class="wide">Reset to endpoint tangents</button><label><input data-field="dotted" type="checkbox" ${i.dotted?'checked':''}> Dotted track marking</label><h3>Lane mapping</h3><p class="small muted">One-based lanes: ${i.lanes.map(l=>`${l[0]+1}→${l[1]+1}`).join(', ')}</p><label>Connections (e.g. 1:1, 2:2, 3:3)<input id="laneMapping" value="${i.lanes.map(l=>`${l[0]+1}:${l[1]+1}`).join(', ')}"></label><button data-action="laneMapping" class="wide">Apply lane mapping</button><div class="actions"><button data-action="insertStation">Insert station</button><button data-action="delete">Delete connection</button></div>`;
+    }else if(capacitor(i.id)){
+      host.innerHTML=`<span class="subtitle">LED decoupling capacitor</span><h2>${esc(i.ref)} · 10 µF / 0402</h2>${position}<p class="muted small">${esc(i.supply)} to GND · grouped from ${esc(i.firstLed)}. Position is saved with this group; changing density can regroup capacitors.</p><button data-action="resetCap" class="wide">Reset automatic placement</button>`;
     }else{
-      host.innerHTML=`<span class="subtitle">${i.kind==='existing'?'Inherited component':'Mechanical item'}</span><h2 style="margin-top:8px">${esc(i.ref)} · ${esc(i.name)}</h2>${position}${i.kind!=='existing'?`<div class="two">${input('Width · mm','w',i.w,{min:.1,max:500})}${input('Height · mm','h',i.h,{min:.1,max:500})}</div>${input('Description','name',i.name,{type:'text'})}`:''}${i.kind==='oled'?`<h3>Display window</h3><div class="two">${input('Active width · mm','activeW',i.activeW,{min:1,max:i.w})}${input('Active height · mm','activeH',i.activeH,{min:1,max:i.h})}</div><div class="note warning">Bare glass / FPC reservation. No daughterboard. Dimensions are editable placeholders, not a verified OLED part.</div>`:''}${i.kind==='encoder'?'<div class="note warning">Encoder body reservation. Shaft, mounting tabs, switch and pin positions require an exact part.</div>':''}${i.kind==='existing'?'<p class="muted small">Exact source footprint and pin nets are retained. Moving it requires rerouting.</p>':''}<label><input type="checkbox" data-field="locked" ${i.locked?'checked':''}> Lock placement</label><div class="actions"><button data-action="fitSelection">Focus</button>${i.kind==='existing'?'':'<button data-action="delete">Delete</button>'}</div>`;
+      host.innerHTML=`<span class="subtitle">${i.kind==='existing'?'Inherited component':'Mechanical item'}</span><h2 style="margin-top:8px">${esc(i.ref)} · ${esc(i.name)}</h2>${position}${i.kind!=='existing'?`<div class="two">${input('Width · mm','w',i.w,{min:.1,max:500})}${input('Height · mm','h',i.h,{min:.1,max:500})}</div>${input('Description','name',i.name,{type:'text'})}`:''}${i.kind==='oled'&&!i.raw?`<h3>Display window</h3><div class="two">${input('Active width · mm','activeW',i.activeW,{min:1,max:i.w})}${input('Active height · mm','activeH',i.activeH,{min:1,max:i.h})}</div><div class="note warning">Bare glass / FPC reservation. No daughterboard. Dimensions are editable placeholders, not a verified OLED part.</div>`:''}${i.kind==='encoder'&&!i.raw?'<div class="note warning">Encoder body reservation. Shaft, mounting tabs, switch and pin positions require an exact part.</div>':''}${i.kind==='existing'?'<p class="muted small">Exact source footprint and pin nets are retained. Moving it requires rerouting.</p>':''}${i.kind!=='existing'&&i.kind!=='hole'?`<h3>Real component</h3><button data-action="assignFootprint" class="wide">${i.raw?'Replace':'Assign'} KiCad footprint</button>${i.raw?`<p class="small muted">${esc(K.footprintInfo(i.raw).name)} · Matching numbered-pin symbol is exported. Enter verified net names, leave blank for unconnected, or enter NC for intentionally unused pins.</p><div class="pin-list">${K.footprintInfo(i.raw).pins.map(pin=>`<label>Pad ${esc(pin)}<input data-pin="${esc(pin)}" value="${esc(i.pinNets?.[pin]||'')}" list="netNames" placeholder="Unconnected"></label>`).join('')}</div><datalist id="netNames">${A.nets.map(raw=>K.val(K.parse(raw)[2])).filter(n=>n&&!n.startsWith('Net-')&&!n.startsWith('unconnected-')).map(n=>`<option value="${esc(n)}"></option>`).join('')}</datalist>`:'<p class="small muted">Choose the exact manufacturer part first. A footprint supplies pad geometry; its interface circuit still needs designing.</p>'}`:''}<label><input type="checkbox" data-field="locked" ${i.locked?'checked':''}> Lock placement</label><div class="actions"><button data-action="fitSelection">Focus</button>${i.kind==='existing'?'':'<button data-action="delete">Delete</button>'}</div>`;
     }
   }
   function fpGraphic(h){
@@ -115,7 +124,7 @@
       const lit=preview&&l.index%13===0,color=lit?C.COLORS[l.channel-1]:'#d5b76e';
       s+=`<g pointer-events="none" transform="translate(${l.x} ${l.y}) rotate(${l.angle})"><rect x="-.8" y="-.75" width="1.6" height="1.5" rx=".18" fill="${preview?(lit?color:'#143237'):'#685532'}" stroke="${color}" stroke-width=".12" ${lit?'style="filter:drop-shadow(0 0 1.7px '+color+')"':''}/><rect x="-.35" y="-.3" width=".7" height=".6" rx=".12" fill="${lit?'#e6faff':'#af9966'}" opacity="${preview&&!lit?.15:.7}"/></g>`;
     }
-    if(showCaps&&!preview)for(const c of generated.caps)s+=`<rect x="${c.x-.5}" y="${c.y-.25}" width="1" height=".5" fill="#e49b67"/>`;
+    if(showCaps&&!preview)for(const c of generated.caps)s+=`<g data-hw="${c.id}" transform="translate(${c.x} ${c.y}) rotate(${-c.angle})"><rect x="-.5" y="-.25" width="1" height=".5" fill="#e49b67"/><rect x="${-Math.max(.8,hit/2)}" y="${-Math.max(.5,hit/2)}" width="${Math.max(1.6,hit)}" height="${Math.max(1,hit)}" fill="transparent" stroke="${selected.has(c.id)?'#b7f9ff':'transparent'}" stroke-width=".2"/></g>`;
     for(const n of model.nodes){
       const sel=selected.has(n.id);if(n.name){const p=C.point(n,(n.tracks-1)/2);
         s+=`<rect data-node="${n.id}" class="n-hit" transform="translate(${p.x} ${p.y}) rotate(${n.angle})" x="-1.25" y="${-(n.tracks-1)*n.pitch/2-1.1}" width="2.5" height="${(n.tracks-1)*n.pitch+2.2}" rx="1" fill="transparent" stroke="${sel?'#b7f9ff':'#d1d9c3'}" stroke-width="${sel?.45:.25}"/>`;
@@ -131,6 +140,7 @@
     }
     if(!preview)for(const id of selected){const e=edge(id);if(e){const c=C.curve(model,e,e.lanes[Math.floor(e.lanes.length/2)]),p=e.waypoint||C.bezier(c,.5),r=5*px;
       s+=`<path data-bend="${id}" d="M${p.x},${p.y-r}L${p.x+r},${p.y}L${p.x},${p.y+r}L${p.x-r},${p.y}Z" fill="#d2faff" stroke="#30454d" stroke-width="${px}" style="cursor:move"/>`;}}
+    if(drag?.type==='marquee'&&drag.current){const a=drag.p,b=drag.current;s+=`<rect x="${Math.min(a.x,b.x)}" y="${Math.min(a.y,b.y)}" width="${Math.abs(a.x-b.x)}" height="${Math.abs(a.y-b.y)}" fill="#7ce9ed20" stroke="#9af4f7" stroke-width="${px}" pointer-events="none"/>`;}
     svg.innerHTML=s;
     $('#ledCount').textContent=generated.leds.length.toLocaleString();$('#stationCount').textContent=model.nodes.filter(n=>n.name).length;
     $('#boardSize').textContent=`${fmt(model.board.width)} × ${fmt(model.board.height)} mm`;$('#zoomLevel').textContent=`${Math.round(100/px)}%`;
@@ -138,21 +148,23 @@
     $('#viewBadge').textContent=preview?'Appearance preview · sample lights, not live trains':'PCB layout · millimetres';
     wrap.classList.toggle('pan',tool==='pan'||space);
   }
-  function setTool(t){tool=t;connectStart=null;document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===t));$('#canvasHelp').textContent=t==='connect'?'Click the first station or node, then the second.':'Drag to move · Wheel to zoom · Space + drag to pan · Shift-click to multi-select';renderCanvas();}
+  function setTool(t){tool=t;connectStart=null;document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===t));$('#canvasHelp').textContent=t==='connect'?'Click the first station or node, then the second.':'Drag to move · Wheel to zoom · Space + drag to pan · Drag empty space to select a group · Shift-click to add';renderCanvas();}
   function modal(title,html){$('#modalHost').innerHTML=`<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="close-row"><h2>${title}</h2><button data-action="closeModal" aria-label="Close dialog">×</button></div>${html}</section></div>`;$('#modalHost button')?.focus();}
   function closeModal(){$('#modalHost').innerHTML='';}
   function addStation(catalog){mutate(()=>{
     const n=C.makeNode(catalog?.name||'New station',snapped(view.x+view.w/2),snapped(view.y+view.h/2),2,1);
     if(catalog){n.stationId=catalog.stationId;n.platforms=C.clone(catalog.platforms);}
     C.addNode(model,n);selected=new Set([n.id]);});showUnplaced=false;renderLeft();}
-  function addHardware(kind){mutate(()=>{const oled=kind==='oled';const h={id:C.id(kind),kind,ref:(oled?'OLED':kind==='encoder'?'ENC':'MH')+(model.hardware.filter(h=>h.kind===kind).length+1),name:oled?'Bare OLED · part pending':kind==='encoder'?'Push rotary encoder · part pending':'Mounting hole',x:snapped(view.x+view.w/2),y:snapped(view.y+view.h/2),angle:0,w:oled?35:kind==='hole'?3.2:16,h:oled?25:kind==='hole'?3.2:16,locked:false};if(oled){h.activeW=29;h.activeH=14;}model.hardware.push(h);selected=new Set([h.id]);});}
+  function addHardware(kind){mutate(()=>{const oled=kind==='oled';const h={id:C.id(kind),kind,ref:nextRef(oled?'OLED':kind==='encoder'?'ENC':'MH'),name:oled?'Bare OLED · part pending':kind==='encoder'?'Push rotary encoder · part pending':'Mounting hole',x:snapped(view.x+view.w/2),y:snapped(view.y+view.h/2),angle:0,w:oled?35:kind==='hole'?3.2:16,h:oled?25:kind==='hole'?3.2:16,locked:false};if(oled){h.activeW=29;h.activeH=14;}model.hardware.push(h);selected=new Set([h.id]);});}
   function deleteSelection(){
     const targets=[...selected].filter(id=>item(id));if(!targets.length)return;
+    if(targets.some(id=>capacitor(id))){toast('Capacitors are generated from LED groups. Use Reset automatic placement or change the grouping in Board.');return;}
     if(targets.some(id=>hardware(id)?.kind==='existing')){toast('Inherited circuit components are protected. You can move them, but not silently delete them.');return;}
     if(!confirm(`Delete ${targets.length} selected object(s) and attached connections? Undo will restore them.`))return;
     mutate(()=>{model.nodes=model.nodes.filter(n=>!selected.has(n.id));model.edges=model.edges.filter(e=>!selected.has(e.id)&&!selected.has(e.a)&&!selected.has(e.b));model.hardware=model.hardware.filter(h=>!selected.has(h.id));selected.clear();});
   }
   async function exportProject(){
+    if(exporting)return;exporting=true;
     closeModal();modal('Generating KiCad project','<div class="progress">Generating linked PCB, schematics and mapping files…</div>');
     await new Promise(r=>setTimeout(r,50));
     try{
@@ -160,12 +172,14 @@
       for(const [name,body] of Object.entries(out.files))zip.file(name,body);
       const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE',compressionOptions:{level:5}});
       saveFile(fileSlug()+'-kicad.zip',blob,'application/zip');closeModal();toast('KiCad project exported. Read EXPORT-REVIEW.md before editing or ordering.');
-    }catch(e){closeModal();toast('Export failed: '+e.message);}
+    }catch(e){closeModal();toast('Export failed: '+e.message);}finally{exporting=false;}
   }
-  function previewSvg(){const old=view,oldPreview=preview;view={x:0,y:0,w:model.board.width,h:model.board.height};preview=true;renderCanvas();
+  function previewSvg(){const old=view,oldPreview=preview,oldSelection=selected;try{
+    view={x:0,y:0,w:model.board.width,h:model.board.height};preview=true;selected=new Set();renderCanvas();
     const copy=svg.cloneNode(true);copy.setAttribute('width',model.board.width+'mm');copy.setAttribute('height',model.board.height+'mm');
-    const style=document.createElementNS('http://www.w3.org/2000/svg','style');style.textContent='.hardware-raw{opacity:.65}.pending-shape{stroke:#f8c788;stroke-width:.35;stroke-dasharray:1.6 .8;fill:#735a2320}.selected-outline{stroke:#a6faff;stroke-width:.4;fill:none}';copy.prepend(style);
-    const text=new XMLSerializer().serializeToString(copy);view=old;preview=oldPreview;renderCanvas();return text;}
+    const style=document.createElementNS('http://www.w3.org/2000/svg','style');style.textContent='.hardware-raw{opacity:.65}.pending-shape{stroke:#f8c788;stroke-width:.35;stroke-dasharray:1.6 .8;fill:#735a2320}';copy.prepend(style);
+    return new XMLSerializer().serializeToString(copy);
+    }finally{view=old;preview=oldPreview;selected=oldSelection;renderCanvas();}}
   const actions={
     undo:()=>undo(),redo:()=>undo(true),save:saveProject,open:()=>$('#openFile').click(),fit:()=>fit(),fitSelection:()=>fit(boundsFor([...selected])),
     toggleLibrary:()=>$('#leftPanel').classList.toggle('collapsed'),toggleInspector:()=>$('#rightPanel').classList.toggle('collapsed'),
@@ -182,24 +196,27 @@
     selectController:()=>{const u=model.hardware.find(h=>h.ref==='U1');if(!u)return;selected=new Set(model.hardware.filter(h=>h.kind==='existing'&&Math.abs(h.x-u.x)<55&&Math.abs(h.y-u.y)<25).map(h=>h.id));render();fit(boundsFor([...selected]));},
     alignX:()=>mutate(()=>{const xs=[...selected].map(item).filter(i=>i.x!==undefined&&!i.locked);const avg=xs.reduce((s,i)=>s+i.x,0)/xs.length;xs.forEach(i=>i.x=snapped(avg));}),
     alignY:()=>mutate(()=>{const xs=[...selected].map(item).filter(i=>i.y!==undefined&&!i.locked);const avg=xs.reduce((s,i)=>s+i.y,0)/xs.length;xs.forEach(i=>i.y=snapped(avg));}),
-    lock:()=>mutate(()=>{for(const id of selected){const i=item(id);if(i)i.locked=!i.locked;}}),delete:deleteSelection,
-    duplicate:()=>mutate(()=>{const n=node([...selected][0]);if(!n)return;const copy=C.clone(n);copy.id=C.id('n');copy.x+=10;copy.y+=10;copy.name+=' copy';copy.ledIds=copy.ledIds.map(x=>x===null?null:-1);copy.original=false;C.addNode(model,copy);selected=new Set([copy.id]);}),
-    straighten:()=>mutate(()=>{const e=edge([...selected][0]);if(e)e.waypoint=null;}),
+    lock:()=>mutate(()=>{for(const id of selected){const i=editable(id);if(i)i.locked=!i.locked;}}),delete:deleteSelection,
+    duplicate:()=>mutate(()=>{const n=node([...selected][0]);if(!n)return;const copy=C.clone(n);copy.id=C.id('n');copy.x+=10;copy.y+=10;copy.name+=' copy';copy.labelText=copy.name;copy.stationId='';copy.platforms=[];copy.locked=false;copy.ledIds=copy.ledIds.map(x=>x===null?null:-1);copy.original=false;C.addNode(model,copy);selected=new Set([copy.id]);}),
+    straighten:()=>mutate(()=>{const e=edge([...selected][0]);if(e){e.waypoint=null;delete e.handles;}}),
     laneMapping:()=>{const text=$('#laneMapping').value;mutate(()=>{const e=edge([...selected][0]);e.lanes=text.split(',').map(s=>s.trim().split(':').map(v=>Number(v)-1));});},
-    insertStation:()=>mutate(()=>{const e=edge([...selected][0]);if(!e)return;const p=C.bezier(C.curve(model,e,e.lanes[0]),.5),n=C.makeNode('New station',p.x,p.y,e.lanes.length,e.channel);C.addNode(model,n);model.edges=model.edges.filter(x=>x.id!==e.id);const one=C.makeEdge(node(e.a),n,e.channel),two=C.makeEdge(n,node(e.b),e.channel);one.count=two.count=e.count;one.lanes=e.lanes.map(([a,b],i)=>[a,i]);two.lanes=e.lanes.map(([a,b],i)=>[i,b]);model.edges.push(one,two);selected=new Set([n.id]);}),
-    importFootprint:()=>$('#footprintFile').click(),
+    insertStation:()=>mutate(()=>{const e=edge([...selected][0]);if(e){const n=C.insertStation(model,e);selected=new Set([n.id]);}}),
+    resetCap:()=>mutate(()=>{if(model.capPositions)delete model.capPositions[[...selected][0]];}),
+    importFootprint:()=>{footprintTarget=null;$('#footprintFile').click();},
+    assignFootprint:()=>{footprintTarget=[...selected][0];$('#footprintFile').click();},
     export:()=>modal('Export a real KiCad project',`<div class="note warning">Engineering handoff, not fabrication files. The PCB is unrouted. Exact OLED and encoder parts and their circuits are still required.</div><div class="export-option"><strong>KiCad project ZIP</strong><p class="muted">Placed LED footprints, eight real data chains, regenerated LED/capacitor schematics, preserved main/USB circuit, board edge and station artwork. Includes firmware/backend mapping files.</p><button data-action="confirmExport" class="primary">Download KiCad project</button></div><div class="export-option"><strong>Other formats</strong><div class="actions"><button data-action="svgExport">Appearance SVG</button><button data-action="mappingExport">LED mapping JSON</button><button data-action="save">Editable project JSON</button></div></div><p class="small muted">No native Altium export. KiCad files must be reviewed in KiCad before any manufacturing export. The original files in your forks are not modified.</p>`),
     confirmExport:exportProject,svgExport:()=>saveFile(fileSlug()+'.svg',previewSvg(),'image/svg+xml'),mappingExport:()=>{try{saveFile(fileSlug()+'-leds.json',JSON.stringify(K.mapping(model,A),null,2),'application/json');}catch(e){toast(e.message);}},
     new:()=>modal('Choose a starting project',`<p>Your current project is not replaced until you choose a preset. Save it first if needed.</p><div class="export-option"><strong>Victoria expansion</strong><p class="muted">Kea’s topology plus the regional branches from your reference map. Provisional regional track counts and layout.</p><button data-action="presetVictoria">Open Victoria expansion</button></div><div class="export-option"><strong>Original Kea topology</strong><p class="muted">All 1,042 LEDs and original track connections, with room for expansion.</p><button data-action="presetKea">Open Kea base</button></div><div class="export-option"><strong>Three-track spacing study</strong><p class="muted">Camberwell to Box Hill, seven intermediate LEDs per track. A small layout exercise, not a complete circuit.</p><button data-action="presetDemo">Open spacing study</button></div><button data-action="restore">Restore local autosave</button>`),
     presetVictoria:()=>loadPreset('victoria'),presetKea:()=>loadPreset('kea'),presetDemo:()=>loadPreset('demo'),
-    restore:()=>{try{const raw=localStorage.getItem(STORE);if(!raw)throw Error('No autosave found.');loadModel(JSON.parse(raw));closeModal();toast('Local autosave restored.');}catch(e){toast(e.message);}},
+    restore:()=>{if(!replaceAllowed())return;try{const raw=localStorage.getItem(STORE);if(!raw)throw Error('No autosave found.');loadModel(JSON.parse(raw));closeModal();toast('Local autosave restored.');}catch(e){toast(e.message);}},
     help:()=>modal('Quick guide',`<p><strong>1. Shape the board.</strong> Open the Board tab, enter width and height in millimetres. Resizing never scales the LED footprints.</p><p><strong>2. Move stations.</strong> Find a station in the left panel. Drag its outlined track column; drag its name separately to position the label. Use Shift-click to select a group.</p><p><strong>3. Add more LEDs.</strong> Select two consecutive stations with Shift-click, then Rebuild span. Enter the number between the stations <em>on each track</em>. Seven intermediate columns on three tracks adds 21 LEDs.</p><p><strong>4. Shape tracks.</strong> Click a connection and drag its diamond. The inspector edits density, output chain and explicit lane mappings. Connect mode joins two existing stations.</p><p><strong>5. Position hardware.</strong> Use Hardware to locate the OLED, encoder, existing buttons, USB sockets and MCU. Select controller group to move its associated parts together. New OLED/encoder shapes do not imply an electrical design.</p><p><strong>6. Save and export.</strong> Save project downloads a reopenable JSON file. Export KiCad downloads a complete project and mapping files. Finish electrical design, routing, ERC and DRC before ordering.</p><table><tr><td>Wheel</td><td>Zoom at pointer</td></tr><tr><td>Space + drag / middle drag</td><td>Pan</td></tr><tr><td>Shift-click</td><td>Multi-select</td></tr><tr><td>Arrow keys / Shift + arrows</td><td>Nudge one / ten grid steps</td></tr><tr><td>Ctrl+Z / Ctrl+Shift+Z</td><td>Undo / redo</td></tr><tr><td>Ctrl+S / Ctrl+O</td><td>Save / open project</td></tr><tr><td>F / Escape</td><td>Fit selection / clear selection</td></tr></table><div class="note">No installation or internet connection is needed. Autosave is convenient but browser-specific; project JSON is your portable backup. Sample lights in Preview are not live data.</div>`)
   };
-  function loadPreset(which){if(dirty&&!confirm('Replace the current layout? Save a project copy first if needed.'))return;const base=C.baseProject(A);model=which==='victoria'?C.addRegional(base,A):which==='demo'?C.example(base):base;model.preset=which;selected.clear();history=[];future=[];dirty=false;closeModal();regenerate();fit();scheduleSave();}
+  function loadPreset(which){if(!replaceAllowed())return;const base=C.baseProject(A);model=which==='victoria'?C.addRegional(base,A):which==='demo'?C.example(base):base;model.preset=which;fpCache.clear();selected.clear();history=[];future=[];dirty=false;closeModal();regenerate();fit();scheduleSave();}
   function loadModel(m){C.validateSchema(m);
     // Inherited circuit geometry comes from the bundled trusted source snapshot.
-    for(const h of m.hardware)if(h.kind==='existing'){const source=A.hardware.find(x=>x.id===h.id);if(!source)throw Error('Unknown inherited component '+h.id);h.raw=source.raw;h.ref=source.ref;}
-    C.generate(m);C.validateSchema(m);model=m;selected.clear();history=[];future=[];dirty=false;regenerate();fit();scheduleSave();}
+    for(const h of m.hardware)if(h.kind==='existing'){const source=A.hardware.find(x=>x.id===h.id);if(!source)throw Error('Unknown inherited component '+h.id);delete h.raw;h.ref=source.ref;}
+    for(const h of m.hardware)if(h.raw)K.footprintInfo(h.raw);
+    C.generate(m);C.validateSchema(m);fpCache.clear();model=m;selected.clear();history=[];future=[];dirty=false;regenerate();fit();scheduleSave();}
   document.addEventListener('click',e=>{
     const b=e.target.closest('button');if(!b)return;
     if(b.dataset.action){actions[b.dataset.action]?.();return;}
@@ -214,12 +231,13 @@
     const toggles={unplaced:()=>{showUnplaced=el.checked;renderLeft();},snapToggle:()=>snap=el.checked,labelsToggle:()=>showLabels=el.checked,nodesToggle:()=>showNodes=el.checked,hardwareToggle:()=>showHardware=el.checked,capsToggle:()=>showCaps=el.checked,showGrid:()=>showGrid=el.checked};
     if(toggles[el.id]){toggles[el.id]();renderCanvas();return;}
     if(el.dataset.lane!==undefined){mutate(()=>{const n=node([...selected][0]),i=Number(el.dataset.lane);if(el.checked){const key=`${n.id}/lane/${i}`;n.ledIds[i]=model.registry[key]??model.nextBlock++;model.registry[key]=n.ledIds[i];}else n.ledIds[i]=null;});return;}
+    if(el.dataset.pin!==undefined){mutate(()=>{const h=hardware([...selected][0]);if(h){h.pinNets??={};h.pinNets[el.dataset.pin]=el.value.trim();}});return;}
     if(!key)return;const value=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.value;
     if(el.type==='number'&&(!Number.isFinite(value)||(el.min!==''&&value<Number(el.min))||(el.max!==''&&value>Number(el.max)))){toast('Value is outside the allowed range.');render();return;}
     mutate(()=>{
       if(key.startsWith('board.')){const k=key.slice(6);if(k==='name')model.name=value;else model.board[k]=value;}
-      else if(key.startsWith('group.')){const axis=key==='group.dx'?'x':'y';for(const id of selected){const i=item(id);if(i&&!i.locked&&i[axis]!==undefined)i[axis]+=Number(value);}}
-      else {const i=item([...selected][0]);if(!i)return;if(key==='tracks'){C.changeTracks(model,i,Number(value));}
+      else if(key.startsWith('group.')){moveSelection(key==='group.dx'?Number(value):0,key==='group.dy'?Number(value):0);}
+      else {const i=editable([...selected][0]);if(!i)return;if(key==='tracks'){C.changeTracks(model,i,Number(value));}
         else if(key==='name'&&node(i.id)){i.name=value;i.labelText=value;}
         else i[key]=['channel'].includes(key)?Number(value):value;}
     });
@@ -228,7 +246,7 @@
     if(e.button===2)e.preventDefault();const p=world(e),el=e.target.closest('[data-node],[data-label],[data-hw],[data-edge],[data-bend]');
     if(tool==='pan'||space||e.button===1||e.button===2){drag={type:'pan',p,view:{...view},client:{x:e.clientX,y:e.clientY}};svg.setPointerCapture(e.pointerId);wrap.classList.add('dragging');return;}
     if(preview)return;
-    if(!el){if(!e.shiftKey){selected.clear();render();}return;}
+    if(!el){drag={type:'marquee',p,current:p,previous:new Set(e.shiftKey?selected:[])};if(!e.shiftKey)selected.clear();svg.setPointerCapture(e.pointerId);render();return;}
     const d=el.dataset,id=d.node||d.label||d.hw||d.edge||d.bend;
     if(tool==='connect'&&(d.node||d.label)){
       if(!connectStart){connectStart=id;select(id);status('Now click the destination station/node');}
@@ -239,42 +257,51 @@
     if(e.shiftKey){select(id,true);return;}
     if(!selected.has(id))select(id);
     if(item(id)?.locked){toast('This object is locked. Unlock it in the inspector.');return;}
-    drag={type:d.bend?'bend':d.label?'label':'move',id,p,before:snapshot(),original:new Map([...selected].map(id=>[id,C.clone(item(id))]))};
+    drag={type:d.bend?'bend':d.label?'label':'move',id,p,before:snapshot(),original:new Map([...selected].filter(id=>item(id)).map(id=>[id,C.clone(item(id))]))};
     svg.setPointerCapture(e.pointerId);
   });
   svg.addEventListener('pointermove',e=>{
     if(!drag)return;const p=world(e);
     if(drag.type==='pan'){const r=svg.getBoundingClientRect();view.x=drag.view.x-(e.clientX-drag.client.x)/r.width*view.w;view.y=drag.view.y-(e.clientY-drag.client.y)/r.height*view.h;renderCanvas();return;}
+    if(drag.type==='marquee'){drag.current=p;const within=i=>i.x>=Math.min(p.x,drag.p.x)&&i.x<=Math.max(p.x,drag.p.x)&&i.y>=Math.min(p.y,drag.p.y)&&i.y<=Math.max(p.y,drag.p.y);
+      selected=new Set([...drag.previous,...[...model.nodes,...(showHardware?model.hardware:[]),...(showCaps?generated.caps:[])].filter(within).map(i=>i.id)]);renderCanvas();return;}
     const dx=p.x-drag.p.x,dy=p.y-drag.p.y;
     if(drag.type==='label'){const n=node(drag.id),old=drag.original.get(drag.id);n.labelDx=snapped(old.labelDx+dx);n.labelDy=snapped(old.labelDy+dy);}
-    else if(drag.type==='bend'){const e=edge(drag.id);e.waypoint={x:snapped(p.x),y:snapped(p.y)};}
-    else for(const [id,old] of drag.original){const i=item(id);if(i&&i.x!==undefined&&!i.locked){i.x=snapped(old.x+dx);i.y=snapped(old.y+dy);}}
+    else if(drag.type==='bend'){const e=edge(drag.id);e.waypoint={x:snapped(p.x),y:snapped(p.y)};delete e.handles;}
+    else {model=JSON.parse(drag.before);moveSelection(snapped(dx),snapped(dy));}
     try{generated=C.generate(model);renderCanvas();}catch(err){model=JSON.parse(drag.before);drag=null;regenerate();toast(err.message);}
   });
-  const dragEnd=()=>{if(!drag)return;const d=drag;drag=null;wrap.classList.remove('dragging');if(d.type!=='pan'){try{C.validateSchema(model);changed(d.before);}catch(err){model=JSON.parse(d.before);regenerate();toast(err.message);}renderInspector();}};
-  svg.addEventListener('pointerup',dragEnd);svg.addEventListener('pointercancel',()=>{if(drag?.before){model=JSON.parse(drag.before);regenerate();}drag=null;});
+  const dragEnd=()=>{if(!drag)return;const d=drag;drag=null;wrap.classList.remove('dragging');if(d.type==='marquee'){render();return;}if(d.type!=='pan'){try{C.validateSchema(model);changed(d.before);}catch(err){model=JSON.parse(d.before);regenerate();toast(err.message);}renderInspector();}};
+  svg.addEventListener('pointerup',dragEnd);svg.addEventListener('pointercancel',cancelDrag);
   svg.addEventListener('contextmenu',e=>e.preventDefault());
   svg.addEventListener('wheel',e=>{e.preventDefault();const p=world(e),factor=Math.exp(Math.sign(e.deltaY)*.13),w=Math.max(12,Math.min(3000,view.w*factor)),actual=w/view.w;view={x:p.x+(view.x-p.x)*actual,y:p.y+(view.y-p.y)*actual,w,h:view.h*actual};renderCanvas();},{passive:false});
   document.addEventListener('keydown',e=>{
     const editing=/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||'');
-    if(e.key==='Escape'){closeModal();selected.clear();setTool('select');render();return;}
+    if(e.key==='Escape'){cancelDrag();closeModal();selected.clear();setTool('select');render();return;}
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();saveProject();return;}
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='o'){e.preventDefault();$('#openFile').click();return;}
     if(editing||$('#modalHost').children.length)return;
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();undo(e.shiftKey);return;}
+    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){e.preventDefault();undo(true);return;}
     if(e.code==='Space'){e.preventDefault();space=true;renderCanvas();return;}
     if(e.key.toLowerCase()==='f'){fit(selected.size?boundsFor([...selected]):undefined);return;}
     if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();deleteSelection();return;}
-    if(e.key.startsWith('Arrow')){e.preventDefault();const delta=model.board.grid*(e.shiftKey?10:1);mutate(()=>{for(const id of selected){const i=item(id);if(!i||i.locked||i.x===undefined)continue;if(e.key==='ArrowLeft')i.x-=delta;if(e.key==='ArrowRight')i.x+=delta;if(e.key==='ArrowUp')i.y-=delta;if(e.key==='ArrowDown')i.y+=delta;}});}
+    if(e.key.startsWith('Arrow')){e.preventDefault();const delta=model.board.grid*(e.shiftKey?10:1);mutate(()=>moveSelection(e.key==='ArrowLeft'?-delta:e.key==='ArrowRight'?delta:0,e.key==='ArrowUp'?-delta:e.key==='ArrowDown'?delta:0));}
   });
   document.addEventListener('keyup',e=>{if(e.code==='Space'){space=false;renderCanvas();}});
   window.addEventListener('blur',()=>{space=false;dragEnd();});
-  $('#openFile').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;try{if(file.size>15e6)throw Error('Project exceeds 15 MB.');loadModel(JSON.parse(await file.text()));toast('Project opened.');}catch(e){toast(e.message);}e.target.value='';});
-  $('#footprintFile').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;try{if(file.size>500000)throw Error('Footprint exceeds 500 KB.');const raw=await file.text(),f=K.parse(raw);if(f[0]!=='footprint')throw Error('Choose a KiCad .kicad_mod footprint.');mutate(()=>{const h={id:C.id('custom'),ref:'CUSTOM'+model.hardware.length,kind:'custom',name:K.val(f[1]),x:view.x+view.w/2,y:view.y+view.h/2,w:20,h:20,angle:0,raw,locked:false};model.hardware.push(h);selected=new Set([h.id]);});toast('Footprint imported with unconnected pads. Complete its schematic integration in KiCad.');}catch(e){toast(e.message);}e.target.value='';});
+  $('#openFile').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;try{if(file.size>15e6)throw Error('Project exceeds 15 MB.');if(!replaceAllowed())return;loadModel(JSON.parse(await file.text()));toast('Project opened.');}catch(err){toast(err.message);}finally{e.target.value='';}});
+  $('#footprintFile').addEventListener('change',async e=>{const file=e.target.files[0],target=footprintTarget;footprintTarget=null;if(!file)return;try{
+    if(file.size>500000)throw Error('Footprint exceeds 500 KB.');const raw=await file.text(),info=K.footprintInfo(raw);
+    mutate(()=>{let h=target?hardware(target):null;if(target&&!h)throw Error('The selected component no longer exists.');
+      if(!h){h={id:C.id('custom'),ref:nextRef('CUSTOM'),kind:'custom',x:snapped(view.x+view.w/2),y:snapped(view.y+view.h/2),angle:0,locked:false};model.hardware.push(h);}
+      const oldNets=h.pinNets||{};Object.assign(h,{raw,name:info.name,w:Math.max(info.w,h.kind==='oled'?h.activeW:0),h:Math.max(info.h,h.kind==='oled'?h.activeH:0),pinNets:Object.fromEntries(info.pins.map(p=>[p,oldNets[p]||'']))});
+      fpCache.delete(h.id);selected=new Set([h.id]);});toast('Footprint assigned. Set its verified pin nets in the inspector; the matching schematic symbol is included in export.');
+    }catch(err){toast(err.message);}finally{e.target.value='';}});
   new ResizeObserver(()=>{const r=wrap.getBoundingClientRect();view.h=view.w*r.height/r.width;renderCanvas();}).observe(wrap);
   window.addEventListener('beforeunload',e=>{if(dirty){e.preventDefault();e.returnValue='';}});
   // Exposed for deterministic automated tests and advanced local integrations.
-  globalThis.RailStudio={get model(){return model;},get generated(){return generated;},get issues(){return issues;},select,actions,loadModel,loadPreset,saveProject,regenerate,fit};
+  globalThis.RailStudio={get model(){return model;},get generated(){return generated;},get issues(){return issues;},get selection(){return [...selected];},get view(){return {...view};},previewSvg,select,actions,loadModel,loadPreset,saveProject,regenerate,fit};
   regenerate();fit();
   try{if(localStorage.getItem(STORE))status('Previous autosave available under Projects → Restore local autosave');}catch{}
 })();

@@ -66,7 +66,7 @@ test('invalid projects and capacity overruns are rejected before export',()=>{
   const cases=[m=>m.board.grid=0,m=>m.nodes[0].id='"><script>',m=>m.nextBlock=2000,m=>m.nodes[0].ledIds[0]=100,m=>m.edges[0].lanes=[[0,9]],m=>m.hardware[0].activeW=999];
   for(const f of cases){const m=C.example(C.baseProject(A));C.generate(m);f(m);assert.throws(()=>C.validateSchema(m),/Invalid project/);}
   const m=C.addRegional(C.baseProject(A),A);m.edges.forEach(e=>e.count=300);assert.throws(()=>C.generate(m),/20,000 LED/);
-  assert.throws(()=>K.makeExports(C.example(C.baseProject(A)),A),/complete KiCad export/);
+  const damaged=C.baseProject(A);damaged.hardware=damaged.hardware.filter(h=>h.ref!=='U1');assert.throws(()=>K.makeExports(damaged,A),/retain every inherited/);
 });
 
 test('rotation-aware boundary and OLED overlap checks find real mechanical conflicts',()=>{
@@ -112,4 +112,77 @@ test('native project: complete hierarchy, matching pin nets/UUID paths, portable
   for(const [file,tree] of trees)if(/\/(LEDs|Capacitors).*\.kicad_sch$/.test(file))uuids(tree);
   assert.deepEqual(K.mapping(m,A).leds.map(l=>[l.ref,l.index,l.din,l.dout]),out.manifest.map(l=>[l.ref,l.index,l.din,l.dout]));
   const root=path.resolve(__dirname,'../..');if(fs.existsSync(path.join(root,'PCB/Melbourne-Live-Train-Map.kicad_sch')))assert.equal(A.rootSchematic,fs.readFileSync(path.join(root,'PCB/Melbourne-Live-Train-Map.kicad_sch'),'utf8'));
+});
+
+
+test('regional preset starts without LED proximity or board-boundary errors',()=>{
+  const m=C.addRegional(C.baseProject(A),A),g=C.generate(m);
+  assert.equal(g.leds.length,1600);assert.deepEqual(C.checks(m,g).filter(i=>i.level==='error'),[]);
+  assert.ok(JSON.stringify(m).length<500000,'saved models omit trusted footprint duplicates');
+  const again=C.addRegional(C.baseProject(A),A);assert.deepEqual(g.leds.map(l=>l.key),C.generate(again).leds.map(l=>l.key));
+});
+
+test('reverse connections have the same geometry; curved columns use the same parameter',()=>{
+  const m=C.example(C.baseProject(A)),e=m.edges[0];
+  for(const waypoint of [null,{x:29.5,y:20}]){e.waypoint=waypoint;
+    const reverse={...e,a:e.b,b:e.a,lanes:e.lanes.map(([a,b])=>[b,a])};
+    for(let lane=0;lane<3;lane++)for(const t of [0,.1,.33,.5,.9,1]){
+      const p=C.bezier(C.curve(m,e,e.lanes[lane]),t),q=C.bezier(C.curve(m,reverse,reverse.lanes[lane]),1-t);close(p.x,q.x);close(p.y,q.y);}
+    const ls=C.generate(m).leds.filter(l=>l.edgeId===e.id);
+    for(let col=0;col<7;col++){const row=ls.filter(l=>Math.abs(l.fraction-(col+1)/8)<1e-9);assert.equal(row.length,3);close(row[0].t,row[1].t);close(row[1].t,row[2].t);}
+  }
+});
+
+test('station insertion replaces a column, preserves total LEDs and splits a bend',()=>{
+  for(const count of [0,1,2,7,8])for(const bent of [false,true]){
+    const m=C.example(C.baseProject(A)),e=m.edges[0];e.count=count;if(bent)e.waypoint={x:30,y:20};
+    const old=C.generate(m),before=old.leds.length,c=C.bundleCurve(m,e),n=C.insertStation(m,e),g=C.generate(m);C.validateSchema(m);
+    assert.equal(g.leds.length,before+(count===0?3:0));assert.equal(n.tracks,3);
+    const f=count?(Math.floor((count-1)/2)+1)/(count+1):.5,t=C.along(C.sample(c),f).t,p=C.bezier(c,t);
+    close(n.x,p.x);close(n.y,p.y);
+    assert.equal(m.edges.filter(e=>e.a===n.id||e.b===n.id).length,2);
+    assert.ok(!m.edges.some(x=>x.id===e.id));
+    const allocated=new Set(old.leds.map(l=>l.block));for(const block of n.ledIds)assert.ok(!allocated.has(block),'retired IDs are never reused');
+  }
+});
+
+test('group translation preserves exact relative positions, bends, locks and capacitor overrides',()=>{
+  const m=C.example(C.baseProject(A));m.nodes[0].x+=.375;m.nodes[1].x+=.125;m.edges[0].waypoint={x:30.1,y:26.2};
+  const a=m.nodes[0],b=m.nodes[1],dx=b.x-a.x,cap=C.generate(m).caps[0];
+  C.translate(m,[a.id,b.id,cap.id],3,4);close(b.x-a.x,dx);close(m.edges[0].waypoint.x,33.1);close(m.edges[0].waypoint.y,30.2);
+  let changed=C.generate(m).caps.find(c=>c.id===cap.id);close(changed.x,cap.x+3);close(changed.y,cap.y+4);
+  a.locked=true;const old=a.x;C.translate(m,[a.id,b.id],2,0);close(a.x,old);close(m.edges[0].waypoint.x,33.1);
+  const restored=JSON.parse(JSON.stringify(m));C.validateSchema(restored);assert.deepEqual(C.generate(restored).caps,C.generate(m).caps);
+});
+
+const customFootprint=`(footprint "Vendor:Encoder_Test" (version 20241229) (generator "pcbnew") (layer "F.Cu")
+ (property "Reference" "REF**" (at 0 -3) (layer "F.SilkS") (effects (font (size 1 1) (thickness .15))))
+ (fp_rect (start -5 -4) (end 5 4) (stroke (width .2) (type default)) (fill none) (layer "F.SilkS"))
+ (pad "1" thru_hole circle (at -2.54 0) (size 1.5 1.5) (drill .8) (layers "*.Cu" "*.Mask"))
+ (pad "2" thru_hole circle (at 0 0) (size 1.5 1.5) (drill .8) (layers "*.Cu" "*.Mask"))
+ (pad "3" thru_hole circle (at 2.54 0) (size 1.5 1.5) (drill .8) (layers "*.Cu" "*.Mask")))`;
+
+test('assigned hardware exports matching symbols, pin nets, NC flags, paths and portable footprints',()=>{
+  const m=C.example(C.baseProject(A)),h=m.hardware.find(h=>h.kind==='encoder');h.raw=customFootprint;h.name='Test encoder';h.pinNets={'1':'GND','2':'ENCODER_A','3':'NC'};
+  const out=K.makeExports(m,A),root=K.parse(out.files['KiCad/Melbourne-Live-Train-Map.kicad_sch']),pcb=K.parse(out.files['KiCad/Melbourne-Live-Train-Map.kicad_pcb']);
+  assert.equal(out.files['KiCad/USB.kicad_sch'],undefined);assert.ok(out.files['KiCad/User-Components.kicad_sch']);
+  const fp=K.children(pcb,'footprint').find(f=>prop(f,'Reference')===h.ref),p=K.val(K.child(fp,'path')[1]),parts=p.split('/').slice(2,-1);
+  let sheet=root;for(const id of parts){const child=K.children(sheet,'sheet').find(s=>K.val(K.child(s,'uuid')[1])===id);assert.ok(child,'hierarchy segment '+id);sheet=K.parse(out.files['KiCad/'+prop(child,'Sheetfile')]);}
+  const sym=K.children(sheet,'symbol').find(s=>K.val(K.child(s,'uuid')[1])===p.split('/').at(-1));assert.ok(sym);assert.equal(prop(sym,'Footprint'),K.val(fp[1]));
+  const symbolInstance=K.child(K.child(K.child(sym,'instances'),'project'),'path');assert.equal(K.val(symbolInstance[1]),p.slice(0,p.lastIndexOf('/')));
+  const nets=K.children(fp,'pad').map(p=>[K.val(p[1]),K.val(K.child(p,'net')[2])]);assert.deepEqual(nets,[['1','GND'],['2','ENCODER_A'],['3','']]);
+  assert.deepEqual(K.children(sheet,'global_label').map(l=>K.val(l[1])),['GND','ENCODER_A']);assert.equal(K.children(sheet,'no_connect').length,1);
+  const file='KiCad/Studio.pretty/'+K.val(fp[1]).split(':')[1]+'.kicad_mod';assert.ok(out.files[file]);assert.ok(out.files['KiCad/StudioParts.kicad_sym']);
+  const info=K.footprintInfo(customFootprint);assert.deepEqual(info.pins,['1','2','3']);assert.equal(info.w,10);assert.equal(info.h,8);
+  for(const [name,text] of Object.entries(out.files))if(/\.kicad_(sch|pcb|mod|sym)$/.test(name))K.parse(text);
+});
+
+test('study export supports a complete LED-only hierarchy and mounting holes are board-only',()=>{
+  const m=C.example(C.baseProject(A));m.hardware.push({id:'hole-test',kind:'hole',ref:'MH1',name:'Mounting hole',x:5,y:5,w:3.2,h:3.2,angle:0});
+  const out=K.makeExports(m,A),pcb=K.parse(out.files['KiCad/Melbourne-Live-Train-Map.kicad_pcb']);
+  assert.equal(out.manifest.length,123);assert.equal(out.files['KiCad/USB.kicad_sch'],undefined);
+  const fps=K.children(pcb,'footprint');assert.equal(fps.length,out.g.leds.length+out.g.caps.length+1);
+  assert.ok(K.child(fps.find(f=>K.val(f[1])==='Studio:MountingHole'),'attr').includes('board_only'));
+  const hierarchy=new Set();function walk(file,path){const tree=K.parse(out.files['KiCad/'+file]);for(const s of K.children(tree,'symbol'))hierarchy.add(path+'/'+K.val(K.child(s,'uuid')[1]));for(const sh of K.children(tree,'sheet'))walk(prop(sh,'Sheetfile'),path+'/'+K.val(K.child(sh,'uuid')[1]));}
+  walk('Melbourne-Live-Train-Map.kicad_sch','/'+A.rootUuid);for(const led of out.manifest)assert.ok(hierarchy.has(led.schematicPath));
 });

@@ -17,16 +17,18 @@
     if (!a || !b) return null;
     const p0=point(a,lane[0]), p3=point(b,lane[1]);
     const length=distance(p0,p3)/3;
+    if(e.handles)return [p0,{x:p0.x+e.handles[0].x,y:p0.y+e.handles[0].y},{x:p3.x+e.handles[1].x,y:p3.y+e.handles[1].y},p3];
     if(e.waypoint) {
       const mid={x:e.waypoint.x,y:e.waypoint.y};
-      const offset=((lane[0]-(a.tracks-1)/2)*a.pitch + (lane[1]-(b.tracks-1)/2)*b.pitch)/2;
-      const heading=Math.atan2(p3.y-p0.y,p3.x-p0.x);
-      mid.x+=Math.sin(heading)*offset; mid.y-=Math.cos(heading)*offset;
-      return [p0,{x:p0.x+(mid.x-p0.x)*1.333,y:p0.y+(mid.y-p0.y)*1.333},
-        {x:p3.x+(mid.x-p3.x)*1.333,y:p3.y+(mid.y-p3.y)*1.333},p3];
+      // Offset the bend in the stations' physical frame, independent of edge direction.
+      const ca=point(a,(a.tracks-1)/2),cb=point(b,(b.tracks-1)/2);
+      mid.x+=((p0.x-ca.x)+(p3.x-cb.x))/2;mid.y+=((p0.y-ca.y)+(p3.y-cb.y))/2;
+      return [p0,{x:p0.x+(mid.x-p0.x)*(4/3),y:p0.y+(mid.y-p0.y)*(4/3)},
+        {x:p3.x+(mid.x-p3.x)*(4/3),y:p3.y+(mid.y-p3.y)*(4/3)},p3];
     }
-    return [p0,{x:p0.x+Math.cos(rad(a.angle))*length,y:p0.y+Math.sin(rad(a.angle))*length},
-      {x:p3.x-Math.cos(rad(b.angle))*length,y:p3.y-Math.sin(rad(b.angle))*length},p3];
+    const direction=n=>(Math.cos(rad(n.angle))*(p3.x-p0.x)+Math.sin(rad(n.angle))*(p3.y-p0.y)<0?-1:1);
+    return [p0,{x:p0.x+Math.cos(rad(a.angle))*length*direction(a),y:p0.y+Math.sin(rad(a.angle))*length*direction(a)},
+      {x:p3.x-Math.cos(rad(b.angle))*length*direction(b),y:p3.y-Math.sin(rad(b.angle))*length*direction(b)},p3];
   }
   function bezier(c,t) {
     const u=1-t;
@@ -44,7 +46,7 @@
     const target=f*s.total;
     let hi=s.pts.findIndex(p=>p.d>=target); if(hi<1)hi=1;
     const a=s.pts[hi-1],b=s.pts[hi],r=(target-a.d)/(b.d-a.d||1);
-    return {x:a.x+(b.x-a.x)*r,y:a.y+(b.y-a.y)*r,angle:Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI};
+    return {x:a.x+(b.x-a.x)*r,y:a.y+(b.y-a.y)*r,t:a.t+(b.t-a.t)*r,angle:Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI};
   }
   function registry(model,key,preferred) {
     if(model.registry[key]!==undefined)return model.registry[key];
@@ -63,14 +65,14 @@
       const a=nodes.get(e.a),b=nodes.get(e.b); if(!a||!b)continue;
       // One count for the whole bundle: parallel lanes keep aligned LED columns.
       const centerLane=e.lanes[Math.floor(e.lanes.length/2)]; if(!centerLane)continue;
-      const center=sample(curve(model,e,centerLane));
+      const center=sample(bundleCurve(model,e));
       const count=e.mode==='pitch'?Math.max(0,Math.min(300,Math.floor(center.total/e.pitch)-1)):e.count;
       if(leds.length+count*e.lanes.length>20000)throw Error('This project exceeds the 20,000 LED editor limit. Reduce density.');
       for(let li=0;li<e.lanes.length;li++){
         const lane=e.lanes[li],c=curve(model,e,lane),s=sample(c);
         paths.push({e,lane,li,c,s,count});
         for(let j=0;j<count;j++) {
-          const f=(j+1)/(count+1),p=along(s,f),key=`${e.id}/lane/${lane[0]}-${lane[1]}/led/${j}`;
+          const f=(j+1)/(count+1),t=along(center,f).t,p=atCurve(c,t),key=`${e.id}/lane/${lane[0]}-${lane[1]}/led/${j}`;
           const block=registry(model,key);
           const base=a.ledIds.find(v=>v!==null)??a.order??2000;
           leds.push({...p,key,block,ref:'D'+block,nodeId:null,edgeId:e.id,lane:li,station:'',channel:e.channel,rotation:-p.angle,
@@ -86,9 +88,40 @@
     const caps=[];
     for(let ch=1;ch<=8;ch++) {
       const cl=leds.filter(l=>l.channel===ch);
-      for(let j=0;j<cl.length;j+=model.board.capEvery){const l=cl[j];caps.push({ref:'C'+(100+caps.length),x:l.x,y:l.y+3.2,angle:0,supply:l.supply,channel:ch,firstLed:l.ref});}
+      for(let j=0;j<cl.length;j+=model.board.capEvery){const l=cl[j],id='cap-'+ch+'-'+l.block,override=model.capPositions?.[id]||{};
+        caps.push({id,kind:'capacitor',ref:'C'+(100+caps.length),x:l.x,y:l.y+3.2,angle:0,...override,supply:l.supply,channel:ch,firstLed:l.ref,w:1,h:.5});}
     }
     return {leds,paths,caps,channelCounts};
+  }
+  function atCurve(c,t){const p=bezier(c,t),u=1-t;
+    const dx=3*u*u*(c[1].x-c[0].x)+6*u*t*(c[2].x-c[1].x)+3*t*t*(c[3].x-c[2].x);
+    const dy=3*u*u*(c[1].y-c[0].y)+6*u*t*(c[2].y-c[1].y)+3*t*t*(c[3].y-c[2].y);
+    return {...p,t,angle:Math.atan2(dy,dx)*180/Math.PI};
+  }
+  function bundleCurve(m,e){const cs=e.lanes.map(l=>curve(m,e,l));return [0,1,2,3].map(i=>({x:cs.reduce((s,c)=>s+c[i].x,0)/cs.length,y:cs.reduce((s,c)=>s+c[i].y,0)/cs.length}));}
+  function translate(m,ids,dx,dy){
+    const chosen=new Set(ids),moved=new Set(),caps=generate(m).caps;
+    for(const n of [...m.nodes,...m.hardware])if(chosen.has(n.id)&&!n.locked){n.x+=dx;n.y+=dy;moved.add(n.id);}
+    for(const e of m.edges)if(e.waypoint&&moved.has(e.a)&&moved.has(e.b)){e.waypoint.x+=dx;e.waypoint.y+=dy;}
+    for(const cap of caps)if(chosen.has(cap.id)&&!cap.locked){m.capPositions??={};m.capPositions[cap.id]={x:cap.x+dx,y:cap.y+dy,angle:cap.angle};}
+  }
+  function insertStation(m,e){
+    if(e.lanes.length>24)throw Error('This junction has more than 24 paths. Split its individual connections first.');
+    const c=bundleCurve(m,e),s=sample(c),count=e.mode==='pitch'?Math.max(0,Math.min(300,Math.floor(s.total/e.pitch)-1)):e.count;
+    // Replace the central LED column where one exists, preserving the total count.
+    const before=Math.floor(Math.max(0,count-1)/2),t=along(s,count?(before+1)/(count+1):.5).t,p=atCurve(c,t);
+    const n=makeNode('New station',p.x,p.y,e.lanes.length,e.channel);n.angle=p.angle;
+    const a=m.nodes.find(n=>n.id===e.a),b=m.nodes.find(n=>n.id===e.b);n.pitch=(a.pitch+b.pitch)/2;
+    addNode(m,n);
+    const mix=(a,b)=>({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});
+    const p01=mix(c[0],c[1]),p12=mix(c[1],c[2]),p23=mix(c[2],c[3]),p012=mix(p01,p12),p123=mix(p12,p23);
+    const delta=(a,b)=>({x:a.x-b.x,y:a.y-b.y});
+    const one=makeEdge(a,n,e.channel),two=makeEdge(n,b,e.channel);
+    one.lanes=e.lanes.map(([a],i)=>[a,i]);two.lanes=e.lanes.map(([,b],i)=>[i,b]);
+    one.count=before;two.count=Math.max(0,count-1-before);
+    one.handles=[delta(p01,c[0]),delta(p012,p)];two.handles=[delta(p123,p),delta(p23,c[3])];
+    for(const edge of [one,two]){edge.dotted=e.dotted;edge.power=e.power||'auto';edge.region=e.region||'Custom';}
+    m.edges=m.edges.filter(x=>x.id!==e.id);m.edges.push(one,two);return n;
   }
   function makeNode(name,x,y,tracks=2,channel=1) {
     return {id:id('n'),name,x,y,angle:0,pitch:2.5,offset:0,tracks,ledIds:Array(tracks).fill(undefined).map(()=>-1),channel,
@@ -178,6 +211,7 @@
       if(!safeId(e.id)||ids.has(e.id)||!ids.has(e.a)||!ids.has(e.b)||e.a===e.b||edgeIds.has(e.id))fail('corridor references');edgeIds.add(e.id);
       if(e.power&&!['auto','+5V_CH1','+5V_CH2'].includes(e.power))fail('power supply');
       if(!['count','pitch'].includes(e.mode)||!finite(e.count,0,300)||!Number.isInteger(e.count)||!finite(e.pitch,1.7,100)||!finite(e.channel,1,8)||!Number.isInteger(e.channel))fail('corridor settings');
+      if(e.handles&&(!Array.isArray(e.handles)||e.handles.length!==2||e.handles.some(p=>!finite(p.x,-8000,8000)||!finite(p.y,-8000,8000))))fail('curve handles');
       if(e.waypoint&&(!finite(e.waypoint.x,-4000,4000)||!finite(e.waypoint.y,-4000,4000)))fail('curve control');
       const a=m.nodes.find(n=>n.id===e.a),b=m.nodes.find(n=>n.id===e.b);
       if(!Array.isArray(e.lanes)||!e.lanes.length||e.lanes.length>60)fail('lane mapping');
@@ -186,12 +220,23 @@
         pairs.add(pair.join());
       }
     }
-    const hwIds=new Set();for(const h of m.hardware){
+    if(m.capPositions!==undefined){
+      if(!m.capPositions||typeof m.capPositions!=='object'||Array.isArray(m.capPositions)||Object.keys(m.capPositions).length>20000)fail('capacitor positions');
+      for(const [id,p] of Object.entries(m.capPositions))if(!/^cap-[1-8]-[0-9]+$/.test(id)||!p||!finite(p.x,-4000,4000)||!finite(p.y,-4000,4000)||!finite(p.angle,-360,360))fail('capacitor position');
+    }
+    const hwIds=new Set(),customRefs=new Set();for(const h of m.hardware){
       if(!safeId(h.id)||hwIds.has(h.id)||ids.has(h.id)||edgeIds.has(h.id))fail('hardware ID');hwIds.add(h.id);
       if(!['existing','oled','encoder','hole','custom'].includes(h.kind)||typeof h.ref!=='string'||typeof h.name!=='string'||h.name.length>200)fail('hardware type/name');
       for(const k of ['x','y'])if(!finite(h[k],-4000,4000))fail('hardware location');
       if(!finite(h.angle,-360,360)||!finite(h.w,.1,500)||!finite(h.h,.1,500))fail('hardware size');
       if(h.kind==='oled'&&(!finite(h.activeW,.1,h.w)||!finite(h.activeH,.1,h.h)))fail('OLED window must fit inside its body');
+      if(h.kind!=='existing'){
+        if(!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(h.ref)||customRefs.has(h.ref)||m.hardware.some(o=>o.kind==='existing'&&o.ref===h.ref))fail('component reference');customRefs.add(h.ref);
+      }
+      if(h.pinNets!==undefined){
+        if(!h.pinNets||typeof h.pinNets!=='object'||Array.isArray(h.pinNets)||Object.keys(h.pinNets).length>160)fail('component pin assignments');
+        for(const [pin,net] of Object.entries(h.pinNets))if(!/^[A-Za-z0-9_+.-]{1,20}$/.test(pin)||typeof net!=='string'||net.length>100||/[\x00-\x1f]/.test(net))fail('component pin assignment');
+      }
       if(h.raw && (typeof h.raw!=='string'||h.raw.length>500000))fail('footprint size');
     }
     return m;
@@ -214,7 +259,7 @@
       const a=rad(h.angle),w=Math.abs(Math.cos(a))*h.w+Math.abs(Math.sin(a))*h.h,ht=Math.abs(Math.sin(a))*h.w+Math.abs(Math.cos(a))*h.h;
       if(h.x-w/2<0||h.y-ht/2<0||h.x+w/2>m.board.width||h.y+ht/2>m.board.height)add('error',`${h.ref||h.name}: body outside board.`,h.id);
       if(h.kind==='oled'||h.kind==='encoder'){
-        add('warning',`${h.name}: mechanical reservation only; exact part, pads and interface circuitry are not assigned.`,h.id);
+        add('warning',h.raw?`${h.name}: assigned footprint and pin nets need part-datasheet and circuit review.`:`${h.name}: mechanical reservation only; exact part, pads and interface circuitry are not assigned.`,h.id);
         const hits=g.leds.filter(l=>{const dx=l.x-h.x,dy=l.y-h.y;return Math.abs(dx*Math.cos(a)+dy*Math.sin(a))<h.w/2+1&&Math.abs(-dx*Math.sin(a)+dy*Math.cos(a))<h.h/2+1;});
         if(hits.length)add('error',`${h.name} reservation overlaps ${hits.length} LEDs.`,h.id);
       }
@@ -227,12 +272,12 @@
     if(fresh)add('warning',`${fresh} new LED blocks need geographic/backend mapping. Screen positions are not GPS coordinates.`);
     add('info','PCB exports preserve the controller circuit but remove all copper routing. Complete routing and run KiCad ERC/DRC.');
     if(g.channelCounts.some(n=>n>1024))add('warning','A data chain exceeds 1,024 LEDs. Review refresh time and firmware buffers.');
-    if(m.preset==='demo')add('warning','Spacing study only: controller hardware is not included. PCB/schematic export is disabled; use SVG or save the project.');
+    if(m.preset==='demo')add('warning','Spacing study: exported LED chains require an external controller and power supply.');
     return issues;
   }
   function baseProject(assets) {
     const m={schemaVersion:1,name:'Victoria rail map',preset:'kea',board:{width:700,height:540,capEvery:12,grid:1},
-      nodes:clone(assets.nodes),edges:clone(assets.edges),hardware:assets.hardware.map(h=>({...clone(h)})),
+      nodes:clone(assets.nodes),edges:clone(assets.edges),hardware:assets.hardware.map(h=>{const copy=clone(h);delete copy.raw;return copy;}),capPositions:{},
       registry:{},nextBlock:2000,source:assets.source};
     for(const n of m.nodes){n.x+=110;n.y+=145;n.order=n.ledIds.find(x=>x!==null)??2000;}
     for(const h of m.hardware){h.x+=110;h.y+=145;}
@@ -243,9 +288,9 @@
   }
   function addRegional(m,assets) {
     const branches=[
-      ['Geelong / Warrnambool','Sunshine',['Ardeer','Deer Park','Tarneit','West Tarneit','Wyndham Vale','Little River','Lara','Corio','North Shore','North Geelong','Geelong','South Geelong','Marshall','Waurn Ponds','Winchelsea','Birregurra','Colac','Camperdown','Terang','Sherwood Park','Warrnambool'],[25,415],4],
-      ['Ballarat / Ararat','Deer Park',['Caroline Springs','Rockbank','Cobblebank','Melton','Bacchus Marsh','Ballan','Ballarat','Wendouree','Beaufort','Ararat'],[20,200],4],
-      ['Maryborough','Ballarat',['Creswick','Clunes','Talbot','Maryborough'],[45,140],4],
+      ['Geelong / Warrnambool','Sunshine',['Ardeer','Deer Park','Tarneit','West Tarneit','Wyndham Vale','Little River','Lara','Corio','North Shore','North Geelong','Geelong','South Geelong','Marshall','Waurn Ponds','Winchelsea','Birregurra','Colac','Camperdown','Terang','Sherwood Park','Warrnambool'],[25,485],4],
+      ['Ballarat / Ararat','Deer Park',['Caroline Springs','Rockbank','Cobblebank','Melton','Bacchus Marsh','Ballan','Ballarat','Wendouree','Beaufort','Ararat'],[20,175],4],
+      ['Maryborough','Ballarat',['Creswick','Clunes','Talbot','Maryborough'],[35,110],4],
       ['Bendigo','Sunbury',['Clarkefield','Riddells Creek','Gisborne','Macedon','Woodend','Kyneton','Malmsbury','Castlemaine','Kangaroo Flat','Bendigo'],[95,60],5],
       ['Echuca','Bendigo',['Epsom','Huntly','Goornong','Elmore','Rochester','Echuca'],[20,20],5],
       ['Swan Hill','Bendigo',['Eaglehawk','Raywood','Dingee','Pyramid','Kerang','Swan Hill'],[20,85],5],
@@ -261,18 +306,26 @@
         const name=names[i];let n=m.nodes.find(n=>norm(n.name)===norm(name));
         if(!n){
           const t=(i+1)/names.length,s=assets.catalog.find(s=>norm(s.name)===norm(name));
-          n=makeNode(name,startPoint.x+(end[0]-startPoint.x)*t,startPoint.y+(end[1]-startPoint.y)*t,2,ch);
-          n.angle=Math.atan2(end[1]-startPoint.y,end[0]-startPoint.x)*180/Math.PI;n.region=region;
+          let x=startPoint.x+(end[0]-startPoint.x)*t,y=startPoint.y+(end[1]-startPoint.y)*t;
+          if(region==='Geelong / Warrnambool'){
+            if(i<2){x=[133,111][i];y=[237,225][i];}
+            else{x=111+(end[0]-111)*(i-1)/(names.length-2);y=225+(end[1]-225)*(i-1)/(names.length-2);}
+          }
+          n=makeNode(name,x,y,2,ch);n.id='regional-'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+          n.angle=Math.atan2(end[1]-startPoint.y,end[0]-startPoint.x)*180/Math.PI;if(region==='Geelong / Warrnambool')n.angle=i<2?180:Math.atan2(260,-86)*180/Math.PI;n.region=region;
           n.stationId=s?.stationId||'';n.platforms=s?.platforms||[];n.labelDx=6;n.labelDy=0;n.labelSize=1.7;
           addNode(m,n);
         }
-        const e=makeEdge(prev,n,ch);e.count=2;e.region=region;m.edges.push(e);prev=n;
+        const e=makeEdge(prev,n,ch);e.id='regional-link-'+n.id.slice(9);e.count=2;e.region=region;
+        const startLane=Math.floor((prev.tracks-2)/2),reverse=Math.cos(rad(prev.angle-n.angle))<0;
+        e.lanes=[[Math.max(0,startLane),reverse?1:0],[Math.max(0,startLane+1),reverse?0:1]];
+        if(i===0&&['Maryborough','Swan Hill','Shepparton'].includes(region))e.count=1;m.edges.push(e);prev=n;
       }
     }
     m.preset='victoria';return m;
   }
   function example(m) {
-    m.nodes=[];m.edges=[];m.registry={};m.nextBlock=2000;m.board.width=180;m.board.height=90;m.hardware=[];
+    m.nodes=[];m.edges=[];m.registry={};m.capPositions={};m.nextBlock=2000;m.board.width=180;m.board.height=90;m.hardware=[];
     let last=null;
     ['Camberwell','East Camberwell','Canterbury','Chatham','Union','Box Hill'].forEach((name,i)=>{
       const n=addNode(m,makeNode(name,15+i*29,32,3));n.labelDy=i%2?-8:10;n.labelSize=2;
@@ -282,5 +335,5 @@
       {id:'encoder1',kind:'encoder',ref:'ENC1',name:'Push encoder · part pending',x:90,y:65,w:16,h:16,angle:0,locked:false});
     m.name='Camberwell three-track study';m.preset='demo';return m;
   }
-  global.RailCore={clone,rad,distance,norm,id,COLORS,point,curve,bezier,sample,along,generate,makeNode,addNode,makeEdge,changeTracks,collapseSpan,validateSchema,checks,baseProject,addRegional,example};
+  global.RailCore={clone,rad,distance,norm,id,COLORS,point,curve,bundleCurve,bezier,atCurve,sample,along,generate,translate,insertStation,makeNode,addNode,makeEdge,changeTracks,collapseSpan,validateSchema,checks,baseProject,addRegional,example};
 })(globalThis);

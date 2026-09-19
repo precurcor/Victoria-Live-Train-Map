@@ -1,0 +1,38 @@
+name: Layout Studio validation
+on:
+  push:
+    branches: [codex/layout-studio]
+    paths: ['layout-studio/**', '.github/workflows/layout-studio.yml']
+  pull_request:
+    paths: ['layout-studio/**', '.github/workflows/layout-studio.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Editing, geometry and export regression tests
+        run: node --test layout-studio/tests/*.test.js
+      - name: Install native KiCad 9
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-9.0-releases
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends kicad
+          kicad-cli version
+      - name: Export representative projects
+        run: node layout-studio/tools/export-samples.js /tmp/studio-native
+      - name: Native parsing, netlists and schematic parity
+        run: python3 layout-studio/tools/check-native.py /tmp/studio-native
+      - name: Preserve native ERC and DRC reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layout-studio-native-reports
+          path: /tmp/studio-native/**/native-validation/**
+          retention-days: 14
