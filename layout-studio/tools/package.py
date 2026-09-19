@@ -19,7 +19,7 @@ console.log(JSON.stringify({stations:model.nodes.filter(n=>n.name).length,leds:o
 ''',str(STUDIO),temporary],check=True)
     prefix='Victoria-Rail-Layout-Studio/'
     with zipfile.ZipFile(release,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=7) as archive:
-        for name in ['Victoria-Rail-Layout-Studio.html','README.md','INTEGRATION.md','LICENSE']:
+        for name in ['Victoria-Rail-Layout-Studio.html','README.md','START-HERE.txt','INTEGRATION.md','LICENSE']:
             archive.write(STUDIO/name,prefix+name)
         for file in sorted(STUDIO.rglob('*')):
             relative=file.relative_to(STUDIO)

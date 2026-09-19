@@ -1,0 +1,48 @@
+VICTORIA RAIL LAYOUT STUDIO 1.1
+
+Open Victoria-Rail-Layout-Studio.html in a desktop browser.
+No installation, server or internet connection is needed.
+
+The program starts with the 321-station Victoria layout.
+
+BOARD SIZE
+Open Board and enter width and height in millimetres. Objects keep their
+physical size; resizing changes the outline.
+
+MOVE THINGS
+Search Stations or Hardware to locate an object. Drag a station column or
+component; drag station text separately. Drag across empty canvas to select
+a group. Shift-click adds/removes an object. Group moves preserve spacing.
+Enable Capacitors in Board to reposition the generated decoupling parts.
+
+MORE LEDS BETWEEN STATIONS
+Shift-select two consecutive stations, then Rebuild span. Enter the number
+PER TRACK. Three tracks with seven intermediate LEDs means 21 added LEDs.
+Branching junctions are protected: edit their individual connections instead.
+Click a connection to set exact count or target pitch, edit lane mapping,
+or drag its diamond to bend it. Insert station replaces a central LED column
+where one exists; it does not double the LED count.
+
+OLED, ENCODER AND OTHER PARTS
+Place and size the OLED/encoder reservation first. In its inspector, choose
+Assign KiCad footprint and select the exact part's .kicad_mod file. Enter
+verified net names beside its pads. Blank means unconnected; NC means an
+intentionally unused pin. A matching numbered-pin schematic symbol is exported.
+Use Hardware > Import footprint to add other components.
+The program does not choose an OLED part or design its support circuitry.
+
+SAVE / EXPORT
+Save project downloads a .rail.json file; Open resumes it later.
+Projects > Restore local autosave is a browser-specific recovery option.
+Export KiCad downloads the PCB, linked schematics, libraries, LED address
+mapping and a layout preview. Open KiCad/Melbourne-Live-Train-Map.kicad_pro
+in KiCad 9 or newer. The included example-victoria-export shows this structure.
+
+Exported boards need routing, electrical design checks and final manufacturing
+outputs in KiCad. New LED addresses/blocks also need integration in the existing
+firmware/backend before the changed board can show live trains. See INTEGRATION.md.
+
+SHORTCUTS
+Ctrl/Cmd+Z undo; Ctrl/Cmd+Shift+Z or Ctrl+Y redo.
+Space+drag pan; wheel zoom; F fit selection/board; arrows nudge.
+Ctrl/Cmd+S saves the project, not the HTML program.

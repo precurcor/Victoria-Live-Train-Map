@@ -85,11 +85,27 @@
     leds.sort((a,b)=>a.channel-b.channel||a.order-b.order||a.key.localeCompare(b.key));
     // Read against every source LED pad: chains 1/5/6 use CH2; all others CH1.
     for(const l of leds){l.index=channelCounts[l.channel-1]++;l.supply=l.power==='auto'?([1,5,6].includes(l.channel)?'+5V_CH2':'+5V_CH1'):l.power;}
-    const caps=[];
+    const caps=[],cells=new Map(),cellSize=3;
+    const cell=(x,y)=>`${Math.floor(x/cellSize)},${Math.floor(y/cellSize)}`;
+    const occupied=p=>{const key=cell(p.x,p.y);if(!cells.has(key))cells.set(key,[]);cells.get(key).push(p);};
+    leds.forEach(l=>occupied({...l,clearance:2.4}));
+    const bodies=model.hardware.filter(h=>!/^G\*|^G[0-9]/.test(h.ref)).map(h=>{const a=rad(h.angle);return {x:h.x,y:h.y,w:(Math.abs(Math.cos(a))*h.w+Math.abs(Math.sin(a))*h.h)/2+1.2,h:(Math.abs(Math.sin(a))*h.w+Math.abs(Math.cos(a))*h.h)/2+1.2};});
+    function free(p){
+      if(p.x<1.5||p.y<1.5||p.x>model.board.width-1.5||p.y>model.board.height-1.5)return false;
+      const cx=Math.floor(p.x/cellSize),cy=Math.floor(p.y/cellSize);
+      for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)if((cells.get(`${cx+dx},${cy+dy}`)||[]).some(o=>distance(o,p)<o.clearance))return false;
+      return !bodies.some(h=>Math.abs(p.x-h.x)<h.w&&Math.abs(p.y-h.y)<h.h);
+    }
+    function capPosition(l){
+      for(const r of [3.2,4.5,6,8,11,15,20,30,45])for(let step=0;step<16;step++){
+        const angle=rad(l.angle+90+step*22.5),p={x:l.x+r*Math.cos(angle),y:l.y+r*Math.sin(angle)};if(free(p))return p;
+      }
+      return {x:l.x,y:l.y+3.2}; // Congested layouts are still editable; checks report the collision.
+    }
     for(let ch=1;ch<=8;ch++) {
       const cl=leds.filter(l=>l.channel===ch);
       for(let j=0;j<cl.length;j+=model.board.capEvery){const l=cl[j],id='cap-'+ch+'-'+l.block,override=model.capPositions?.[id]||{};
-        caps.push({id,kind:'capacitor',ref:'C'+(100+caps.length),x:l.x,y:l.y+3.2,angle:0,...override,supply:l.supply,channel:ch,firstLed:l.ref,w:1,h:.5});}
+        const p=model.capPositions?.[id]?override:capPosition(l);caps.push({id,kind:'capacitor',ref:'C'+(100+caps.length),...p,angle:override.angle||0,locked:!!override.locked,supply:l.supply,channel:ch,firstLed:l.ref,w:1,h:.5});occupied({...p,clearance:2});}
     }
     return {leds,paths,caps,channelCounts};
   }
@@ -264,6 +280,8 @@
         if(hits.length)add('error',`${h.name} reservation overlaps ${hits.length} LEDs.`,h.id);
       }
     }
+    const capProblems=g.caps.filter(c=>c.x<1||c.y<1||c.x>m.board.width-1||c.y>m.board.height-1||g.leds.some(l=>distance(c,l)<1.8));
+    if(capProblems.length)add('error',`${capProblems.length} capacitors are outside the board or too close to an LED. Enable Capacitors in Board to move them.`,capProblems[0].id);
     const orphan=m.nodes.filter(n=>n.name&&!m.edges.some(e=>e.a===n.id||e.b===n.id));
     if(orphan.length)add('warning',`${orphan.length} stations have no track connection yet.`,orphan[0].id);
     const unlinked=m.nodes.filter(n=>n.name&&!n.stationId);

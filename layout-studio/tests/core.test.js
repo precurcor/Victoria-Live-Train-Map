@@ -104,7 +104,7 @@ test('native project: complete hierarchy, matching pin nets/UUID paths, portable
       const label=K.children(target.tree,'global_label').find(l=>{const at=K.child(l,'at');return Math.abs(+at[1]-px)<.00001&&Math.abs(+at[2]-py)<.00001;});
       assert.ok(label,ref+' pin '+number+' has label at its electrical endpoint');assert.equal(K.val(label[1]),pinNet(f,number));}}
   for(const h of A.hardware){const source=K.parse(h.raw),uuid=K.val(K.child(source,'uuid')[1]),f=fps.find(f=>K.val(K.child(f,'uuid')[1])===uuid);assert.ok(f,h.id);
-    assert.deepEqual(K.children(f,'pad').map(p=>K.child(p,'net')),K.children(source,'pad').map(p=>K.child(p,'net')));}
+    const expected=K.children(source,'pad').map(p=>K.child(p,'net')).map(n=>n&&K.val(n[2])==='Net-(U1-GPIO43{slash}U0TXD)'?[n[0],n[1],JSON.stringify('/MCU_TX')]:n);assert.deepEqual(K.children(f,'pad').map(p=>K.child(p,'net')),expected);}
   const lib=trees.get('KiCad/Studio.pretty/XL1615.kicad_mod');assert.equal(K.child(lib,'at'),undefined);
   for(const pad of K.children(lib,'pad')){close(+K.child(pad,'at')[3],180);assert.equal(K.child(pad,'net'),undefined);}
   // UUIDs must be unique within each generated sheet and across generated pages.
@@ -170,7 +170,7 @@ test('assigned hardware exports matching symbols, pin nets, NC flags, paths and 
   let sheet=root;for(const id of parts){const child=K.children(sheet,'sheet').find(s=>K.val(K.child(s,'uuid')[1])===id);assert.ok(child,'hierarchy segment '+id);sheet=K.parse(out.files['KiCad/'+prop(child,'Sheetfile')]);}
   const sym=K.children(sheet,'symbol').find(s=>K.val(K.child(s,'uuid')[1])===p.split('/').at(-1));assert.ok(sym);assert.equal(prop(sym,'Footprint'),K.val(fp[1]));
   const symbolInstance=K.child(K.child(K.child(sym,'instances'),'project'),'path');assert.equal(K.val(symbolInstance[1]),p.slice(0,p.lastIndexOf('/')));
-  const nets=K.children(fp,'pad').map(p=>[K.val(p[1]),K.val(K.child(p,'net')[2])]);assert.deepEqual(nets,[['1','GND'],['2','ENCODER_A'],['3','']]);
+  const nets=K.children(fp,'pad').map(p=>[K.val(p[1]),K.val(K.child(p,'net')[2])]);assert.deepEqual(nets,[['1','GND'],['2','ENCODER_A'],['3','unconnected-(ENC1-Pad3)']]);
   assert.deepEqual(K.children(sheet,'global_label').map(l=>K.val(l[1])),['GND','ENCODER_A']);assert.equal(K.children(sheet,'no_connect').length,1);
   const file='KiCad/Studio.pretty/'+K.val(fp[1]).split(':')[1]+'.kicad_mod';assert.ok(out.files[file]);assert.ok(out.files['KiCad/StudioParts.kicad_sym']);
   const info=K.footprintInfo(customFootprint);assert.deepEqual(info.pins,['1','2','3']);assert.equal(info.w,10);assert.equal(info.h,8);
@@ -182,7 +182,7 @@ test('study export supports a complete LED-only hierarchy and mounting holes are
   const out=K.makeExports(m,A),pcb=K.parse(out.files['KiCad/Melbourne-Live-Train-Map.kicad_pcb']);
   assert.equal(out.manifest.length,123);assert.equal(out.files['KiCad/USB.kicad_sch'],undefined);
   const fps=K.children(pcb,'footprint');assert.equal(fps.length,out.g.leds.length+out.g.caps.length+1);
-  assert.ok(K.child(fps.find(f=>K.val(f[1])==='Studio:MountingHole'),'attr').includes('board_only'));
+  assert.ok(K.child(fps.find(f=>K.val(f[1])==='Studio:Hole_hole-test'),'attr').includes('board_only'));
   const hierarchy=new Set();function walk(file,path){const tree=K.parse(out.files['KiCad/'+file]);for(const s of K.children(tree,'symbol'))hierarchy.add(path+'/'+K.val(K.child(s,'uuid')[1]));for(const sh of K.children(tree,'sheet'))walk(prop(sh,'Sheetfile'),path+'/'+K.val(K.child(sh,'uuid')[1]));}
   walk('Melbourne-Live-Train-Map.kicad_sch','/'+A.rootUuid);for(const led of out.manifest)assert.ok(hierarchy.has(led.schematicPath));
 });

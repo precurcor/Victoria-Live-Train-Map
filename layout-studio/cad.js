@@ -109,9 +109,11 @@
     const mapOnly=model.preset==='demo'&&inherited.length===0;
     if(!mapOnly&&(inherited.length!==assets.hardware.length||assets.hardware.some(h=>!inherited.some(x=>x.id===h.id))))
       throw Error('A controller project must retain every inherited controller/power/USB footprint. Restore missing components or use the LED-only spacing-study preset.');
+    // The source PCB predates this label in its unchanged schematic (native KiCad parity check).
+    const netAliases={'Net-(U1-GPIO43{slash}U0TXD)':'/MCU_TX'};
     const netMap=new Map();let nextNet=1;
-    for(const s of assets.nets){const n=parse(s);netMap.set(val(n[2]),Number(n[1]));nextNet=Math.max(nextNet,Number(n[1])+1);}
-    const netId=name=>{if(!netMap.has(name))netMap.set(name,nextNet++);return netMap.get(name);};
+    for(const s of assets.nets){const n=parse(s);netMap.set(netAliases[val(n[2])]||val(n[2]),Number(n[1]));nextNet=Math.max(nextNet,Number(n[1])+1);}
+    const netId=name=>{name=netAliases[name]||name;if(!netMap.has(name))netMap.set(name,nextNet++);return netMap.get(name);};
     const rootPath='/'+assets.rootUuid,pcbItems=[],manifest=[];
     const leafSheets={};
     const ledSymbol=children(parse(assets.ledLib),'symbol').find(s=>val(s[1]).includes('1615'));
@@ -159,16 +161,22 @@
     });
     files['KiCad/Capacitors.kicad_sch']=schWrap(uuid('caps-root'),'(lib_symbols)',Object.entries(capLeaves).map(([p,s],i)=>sheet(`LED decoupling / ${p}`,s.file,s.sheetId,25+(i%4)*90,35+Math.floor(i/4)*35,`10.${p}`,`${rootPath}/${capParent.uuid}`)),'Grouped LED decoupling');
     for(const [p,s] of Object.entries(capLeaves))files['KiCad/'+s.file]=schWrap(s.uid,capLib,s.body,`Decoupling / ${p}`);
+    const sourceValues=new Map();
+    for(const raw of [assets.rootSchematic,assets.usbSchematic])for(const symbol of children(parse(raw),'symbol'))sourceValues.set(val(property(symbol,'Reference')?.[2]),val(property(symbol,'Value')?.[2]));
     const customSymbols=new Map(),extraSheets=[];
     for(const h of model.hardware){
       if(h.kind==='existing'){
         const source=assets.hardware.find(x=>x.id===h.id);if(!source)throw Error('Unknown inherited hardware: '+h.id);
-        pcbItems.push(dump(poseFootprint(source.raw,h,null,null,null,netId)));
+        const f=poseFootprint(source.raw,h,null,null,null,netId),value=property(f,'Value');
+        if(value&&sourceValues.has(h.ref))value[2]=q(sourceValues.get(h.ref));
+        for(const pad of children(f,'pad')){const n=child(pad,'net'),alias=n&&netAliases[val(n[2])];if(alias)set(pad,'net',['net',String(netId(alias)),q(alias)]);}
+        pcbItems.push(dump(f));
       }else if(h.raw){
         const sheetId=uuid('part-sheet/'+h.id),partPath=`${rootPath}/${sheetId}`,part=customPart(h,partPath),padNets={};
-        const info=footprintInfo(h.raw);for(const pin of info.pins){const net=h.pinNets?.[pin]?.trim();padNets[pin]=net&&net!=='NC'?net:null;}
+        const info=footprintInfo(h.raw);for(const pin of info.pins){const net=h.pinNets?.[pin]?.trim();padNets[pin]=net&&net!=='NC'?(netAliases[net]||net):`unconnected-(${h.ref}-Pad${pin})`;}
         const fp=poseFootprint(h.raw,h,h.ref,`${partPath}/${part.uuid}`,padNets,netId);
         for(const pad of children(fp,'pad'))if(!info.pins.includes(val(pad[1])))set(pad,'net',['net','0',q('')]);
+        const value=property(fp,'Value');if(value)value[2]=q(h.name);else fp.push(['property',q('Value'),q(h.name),['at','0','3','0'],['layer',q('F.Fab')],['effects',['font',['size','1','1'],['thickness','.15']]]]);
         if(!child(fp,'uuid'))fp.push(['uuid',q(uuid('fp/'+h.id))]);fp[1]=q('Studio:'+part.fpName);
         pcbItems.push(dump(fp));
         files[`KiCad/${part.fpName}.kicad_sch`]=schWrap(uuid('part-file/'+h.id),`(lib_symbols ${part.library})`,part.body,`${h.ref}: ${h.name} — verify pin assignments`);
@@ -176,8 +184,11 @@
         const symbol=parse(part.library);symbol[1]=q(part.name);customSymbols.set(part.name,dump(symbol));
         extraSheets.push(sheet(`${h.ref} — user component`,`${part.fpName}.kicad_sch`,sheetId,25.4+(extraSheets.length%3)*88.9,35.56+Math.floor(extraSheets.length/3)*35.56,String(20+extraSheets.length),rootPath));
       }else if(h.kind==='hole'){
-        pcbItems.push(`(footprint "Studio:MountingHole" (layer "F.Cu") (at ${num(h.x)} ${num(h.y)}) (uuid ${q(uuid(h.id))}) (attr board_only exclude_from_pos_files exclude_from_bom)
-          (pad "" np_thru_hole circle (at 0 0) (size ${num(h.w)} ${num(h.w)}) (drill ${num(h.w)}) (layers "*.Cu" "*.Mask")))`);
+        const name='Hole_'+h.id,raw=`(footprint ${q('Studio:'+name)} (layer "F.Cu") (at ${num(h.x)} ${num(h.y)}) (uuid ${q(uuid(h.id))}) (attr board_only exclude_from_pos_files exclude_from_bom)
+          (property "Reference" ${q(h.ref)} (at 0 -3 0) (layer "F.SilkS") (effects (font (size 1 1) (thickness .15))))
+          (property "Value" "MountingHole" (at 0 3 0) (layer "F.Fab") (effects (font (size 1 1) (thickness .15))))
+          (pad "" np_thru_hole circle (at 0 0) (size ${num(h.w)} ${num(h.w)}) (drill ${num(h.w)}) (layers "*.Cu" "*.Mask")))`;
+        pcbItems.push(raw);files[`KiCad/Studio.pretty/${name}.kicad_mod`]=libraryFoot(raw,name);
       }else{
         const angle=C.rad(h.angle),rot=(x,y)=>({x:h.x+x*Math.cos(angle)-y*Math.sin(angle),y:h.y+x*Math.sin(angle)+y*Math.cos(angle)});
         const corners=[rot(-h.w/2,-h.h/2),rot(h.w/2,-h.h/2),rot(h.w/2,h.h/2),rot(-h.w/2,h.h/2)];
@@ -250,7 +261,7 @@
       blocks:manifest.filter(l=>l.nodeId===n.id).map(l=>l.block),trackCount:n.tracks,geographicStatus:n.original?'original-blocks':'needs-KML'})),null,2);
     files['mapping/layout-addresses.h']='#pragma once\n#include <stdint.h>\n// Generated layout lookup. Integration required in mapLeds.cpp; not a standalone firmware.\nstruct LayoutAddress { uint16_t block; uint8_t channel; uint16_t index; };\nstatic const LayoutAddress LAYOUT_ADDRESSES[] = {\n'+
       manifest.map(l=>`  {${l.block}, ${l.channel}, ${l.index}},`).join('\n')+'\n};\nstatic const uint16_t LAYOUT_CHAIN_LENGTHS[8] = {'+g.channelCounts.join(', ')+'};\n';
-    files['EXPORT-REVIEW.md']=`# Layout export — NOT manufacturing ready\n\n${model.name}\n\n${manifest.length} map LEDs; ${g.caps.length} generated 10 uF grouped decoupling capacitors; ${model.hardware.filter(h=>h.kind==='existing').length} retained controller/power/USB footprints.\n\nOpen KiCad/Melbourne-Live-Train-Map.kicad_pro in KiCad 9+.\n\n${mapOnly?'This LED-only study omits the controller and USB circuits; supply the exported power rails and LED_DATA_5V_CHx signals externally.':'The existing main and USB circuits are preserved; a user-components hierarchy is added only when parts are assigned.'} LED and decoupling sheets are regenerated and linked to PCB footprints by matching UUID paths. Data chains, supply nets and ground are real nets, not silk drawings. All copper tracks, vias and fills from the original board are deliberately removed: arbitrary relocation makes them invalid. Route and validate in KiCad. The source MCU/RF/power topology is unchanged, but its placement and RF geometry must be reviewed; original routing/antenna copper was NOT retained.\n\nOLED/encoder items without an exact part are drawings on Dwgs.User only. There is no guessed FPC pinout, OLED charge-pump circuit, encoder debounce or GPIO assignment. Assigned footprints have matching schematic symbols with numbered passive pins. Only the pin nets you enter are connected; blank pins are unconnected and NC pins are explicitly marked no-connect. A generic symbol does not verify a device’s electrical pin types, power requirements or interface circuit. Complete these circuits before ordering.\n\nThe source schematic instances retain the upstream project name to keep hierarchy identity. Source and assigned footprint/symbol libraries are bundled with this project. The source project's external 3D model paths are omitted.\n\nAutomatic capacitor placement is provisional. Grouping is inherited practice, not a validated decoupling/power design. Review current, voltage drop, connectors, protection, capacitor spacing and supply-domain assignment for the larger board.\n\nFirmware/backend: manifest and header are integration inputs, not automatic modifications of your other forks. Old block numbers are retained for surviving original LEDs, but chain indexes can change. New intermediate LEDs need real geographic block/transition definitions; canvas coordinates must never be treated as GPS. Saved timetable arrays must also be regenerated before using timetable mode with a changed layout.\n\nValidation\n${issues.map(i=>'- '+i.level.toUpperCase()+': '+i.message).join('\n')}\n\nNative KiCad loading/ERC/DRC has not been verified in the build environment. Run tools/validate-kicad.py from the program source on a machine with KiCad installed.\n`;
+    files['EXPORT-REVIEW.md']=`# Layout export — NOT manufacturing ready\n\n${model.name}\n\n${manifest.length} map LEDs; ${g.caps.length} generated 10 uF grouped decoupling capacitors; ${model.hardware.filter(h=>h.kind==='existing').length} retained controller/power/USB footprints.\n\nOpen KiCad/Melbourne-Live-Train-Map.kicad_pro in KiCad 9+.\n\n${mapOnly?'This LED-only study omits the controller and USB circuits; supply the exported power rails and LED_DATA_5V_CHx signals externally.':'The existing main and USB circuits are preserved; a user-components hierarchy is added only when parts are assigned.'} LED and decoupling sheets are regenerated and linked to PCB footprints by matching UUID paths. Data chains, supply nets and ground are real nets, not silk drawings. All copper tracks, vias and fills from the original board are deliberately removed: arbitrary relocation makes them invalid. Route and validate in KiCad. The inherited MCU TX net name and mounting-hole values are reconciled to the source schematic. The source MCU/RF/power topology is unchanged, but its placement and RF geometry must be reviewed; original routing/antenna copper was NOT retained.\n\nOLED/encoder items without an exact part are drawings on Dwgs.User only. There is no guessed FPC pinout, OLED charge-pump circuit, encoder debounce or GPIO assignment. Assigned footprints have matching schematic symbols with numbered passive pins. Only the pin nets you enter are connected; blank pins are unconnected and NC pins are explicitly marked no-connect. A generic symbol does not verify a device’s electrical pin types, power requirements or interface circuit. Complete these circuits before ordering.\n\nThe source schematic instances retain the upstream project name to keep hierarchy identity. Source and assigned footprint/symbol libraries are bundled with this project. The source project's external 3D model paths are omitted.\n\nAutomatic capacitor placement is provisional. Grouping is inherited practice, not a validated decoupling/power design. Review current, voltage drop, connectors, protection, capacitor spacing and supply-domain assignment for the larger board.\n\nFirmware/backend: manifest and header are integration inputs, not automatic modifications of your other forks. Old block numbers are retained for surviving original LEDs, but chain indexes can change. New intermediate LEDs need real geographic block/transition definitions; canvas coordinates must never be treated as GPS. Saved timetable arrays must also be regenerated before using timetable mode with a changed layout.\n\nValidation\n${issues.map(i=>'- '+i.level.toUpperCase()+': '+i.message).join('\n')}\n\nNative KiCad loading/ERC/DRC has not been verified in the build environment. Run tools/validate-kicad.py from the program source on a machine with KiCad installed.\n`;
     files['LICENSE']=assets.license;
     return {files,g,issues,manifest};
   }
